@@ -1,4718 +1,2941 @@
-/**
- * PCM Data Grouping Tool
- * Main application logic for handling file uploads, data processing, 
- * visualization, and interactive data selection.
- */
+/************************************************************
+ * Global Variables
+ ************************************************************/
+let parsedData = [];         // All parsed data points
+let filteredData = [];       // Filtered data (by RID)
+let selectedDataPoints = []; // Currently selected points (by station index)
+let customGroups = [];       // User-defined data point groups
+let removedPoints = [];      // Points removed from chart
+let currentRID = null;       // Currently selected Route ID
+let isRemoveMode = false;    // Whether remove mode is active (for clicking points)
+let mapInstance = null;      // Leaflet map instance
+let mapMarkers = [];         // Array of Leaflet markers
+let selectedGroups = [];     // Array of group IDs that are selected for percentage change calculation
+let originalColumns = [];    // Original column order from Excel file
+let colorPalette = [
+  '#FF6384', // Bright pink
+  '#FF9F40', // Orange
+  '#4BC0C0', // Teal
+  '#9966FF', // Purple
+  '#C9CB3A', // Lime
+  '#EA5545', // Coral
+  '#87BC45', // Green
+  '#D85040', // Rust
+  '#B33DC6', // Magenta
+  '#46A2D5', // Light blue
+  '#E27A3F', // Burnt orange
+  '#75DDDD'  // Aqua
+];
+let viewedRIDs = new Set();  // Track RIDs that user has already viewed
 
-// Register Chart.js plugins when the document is loaded
-document.addEventListener('DOMContentLoaded', function() {
-    // The zoom plugin should be automatically registered when loaded from CDN
-    console.log('Chart.js plugins loaded');
-});
+// Map variables
+let mapInitialized = false;  // Track if map was successfully initialized
 
-// Global variables
-let parsedData = [];
-let filteredData = []; // For storing data filtered by RID
-let chart = null;
-let map = null;
-let mapMarkers = [];
-let selectedDataPoints = [];
-let dataParameters = {
-    current: [],
-    potential: [],
-    anomalies: []
-};
-let activeParameter = 'signal'; // Default parameter to display (changed from 'value' to 'signal')
-let isSelecting = false;
-let dragStart = null;
-let selectedArea = null;
-let isUpdating = false; // Flag to prevent recursive updates
-let customGroups = []; // Array to store custom groups (now RID-specific)
-let currentRID = null; // Track the currently selected RID
-let groupColors = [
-    '#FF6384', '#FFCE56', '#4BC0C0', '#9966FF', 
-    '#FF9F40', '#8AC54B', '#F2545B', '#E83E8C', '#DC3545', '#FD7E14'
-]; // Colors for custom groups - removed blue (#36A2EB) and replaced with more distinct colors
-let removedPoints = []; // Array to store points removed from the chart
-let isRKeyPressed = false; // Flag to track if R key is pressed
-let animationFrameId = null; // To store the animation frame ID
-
-// Define and register the barSpan plugin for Chart.js
-const barSpanPlugin = {
-    id: 'barSpan',
-    // Store the active hover bar for tooltip display
-    _hoverBar: null,
-    
-    beforeDatasetsDraw: function(chart) {
-        const ctx = chart.ctx;
-        const datasets = chart.data.datasets || [];
-        
-        console.log(`barSpanPlugin processing ${datasets.length} datasets`);
-        let barsDrawn = 0;
-        let transitionBarsDrawn = 0;
-        
-        // Store bar information for hover detection
-        this._bars = [];
-        
-        // Draw percentage change bars (continuous bars)
-        datasets.forEach((dataset, i) => {
-            // Skip if not a continuous bar dataset or hidden
-            if (!dataset.continuousBar) return;
-            
-            // Skip if dataset is hidden
-            const meta = chart.getDatasetMeta(i);
-            if (meta.hidden) {
-                console.log(`Dataset ${i} (${dataset.label}) is hidden, skipping`);
-                return;
-            }
-            
-            const xScale = chart.scales.x;
-            const yScale = chart.scales[dataset.yAxisID] || chart.scales.y;
-            
-            // Get the bar dimensions for X axis (horizontal span)
-            const startX = xScale.getPixelForValue(dataset.startX);
-            const endX = xScale.getPixelForValue(dataset.endX);
-            const barWidth = endX - startX;
-
-            // Always get the bottom of the chart (y=0) for the baseline
-            const bottomY = yScale.getPixelForValue(0);
-            
-            // Calculate the height dynamically based on the percentage value
-            const barValue = dataset.barValue;
-            const topY = yScale.getPixelForValue(barValue);
-            
-            // Calculate height - ensure it's positive for upward bars
-            let rectH = bottomY - topY;
-            
-            // Initialize rectY with the correct position based on the value
-            let rectY = topY;
-            
-            // Ensure the bar is visible within the chart area
-            if (startX > endX) {
-                // Swap if start is after end
-                const temp = startX;
-                startX = endX;
-                endX = temp;
-            }
-            
-            // Ensure the width is at least 1 pixel
-            if (barWidth < 1) {
-                const midPoint = (startX + endX) / 2;
-                startX = midPoint - 1;
-                endX = midPoint + 1;
-                barWidth = 2;
-            }
-            
-            if (barWidth > 0) {
-                console.log(`Drawing ${dataset.isTransition ? 'transition' : 'regular'} bar: ${dataset.label}, startX=${startX}, endX=${endX}, width=${barWidth}, height=${rectH}, value=${dataset.barValue}`);
-                
-                // Store bar information for hover detection
-                this._bars.push({
-                    startX: startX,
-                    endX: endX,
-                    topY: rectY,
-                    bottomY: rectY + rectH,
-                    dataset: dataset,
-                    barValue: barValue,
-                    startStation: dataset.startX,
-                    endStation: dataset.endX
-                });
-                
-                // Draw as a filled rectangle 
-                ctx.save();
-                
-                // Fill with dataset color
-                ctx.fillStyle = dataset.backgroundColor;
-                
-                // For transition bars, use a pattern to make them more visible
-                if (dataset.isTransition) {
-                    // Use a slightly lighter fill for transition bars
-                    const color = dataset.backgroundColor;
-                    // Make the fill slightly lighter for transition bars
-                    if (color.includes('rgba')) {
-                        // If it's an rgba color, adjust the opacity
-                        const parts = color.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
-                        if (parts) {
-                            const r = parseInt(parts[1]);
-                            const g = parseInt(parts[2]);
-                            const b = parseInt(parts[3]);
-                            const a = parseFloat(parts[4]);
-                            // Use a slightly higher opacity
-                            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${a * 0.8})`;
-                        } else {
-                            ctx.fillStyle = color;
-                        }
-                    } else {
-                        ctx.fillStyle = color;
-                    }
-                    ctx.fillRect(startX, rectY, barWidth, rectH);
-                } else {
-                    // Regular fill for normal bars
-                    ctx.fillRect(startX, rectY, barWidth, rectH);
-                }
-                
-                // Add a border
-                ctx.strokeStyle = dataset.borderColor || dataset.backgroundColor;
-                ctx.lineWidth = dataset.borderWidth || 1;
-                
-                // Use dashed lines for transition bars
-                if (dataset.isTransition) {
-                    ctx.setLineDash([5, 5]);
-                    transitionBarsDrawn++;
-                } else {
-                    ctx.setLineDash([]);
-                    barsDrawn++;
-                }
-                
-                ctx.strokeRect(startX, rectY, barWidth, rectH);
-                
-                // Add label if enough space
-                if (barWidth > 40) {
-                    ctx.fillStyle = '#ffffff';
-                    ctx.font = 'bold 10px Arial';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    
-                    let labelText;
-                    if (dataset.isTransition) {
-                        // For transition bars, show the percentage change
-                        labelText = `${(dataset.barValue * 100).toFixed(3)}%`;
-                    } else {
-                        // For regular group bars, show the group name and percentage
-                        const groupName = dataset.label.replace(' % Change', '');
-                        labelText = `${groupName}: ${(dataset.barValue * 100).toFixed(3)}%`;
-                    }
-                    
-                    const labelY = rectY + (rectH / 2);
-                    ctx.fillText(labelText, startX + (barWidth / 2), labelY);
-                }
-                
-                ctx.restore();
-            } else {
-                console.warn(`Skipping bar with invalid width: ${dataset.label}, startX=${startX}, endX=${endX}, width=${barWidth}`);
-            }
-        });
-        
-        console.log(`barSpanPlugin drew ${barsDrawn} regular bars and ${transitionBarsDrawn} transition bars`);
-    },
-    
-    // Add hover detection for bars
-    afterDatasetsDraw: function(chart, args, options) {
-        // If we have an active hover bar, draw the tooltip
-        if (this._hoverBar) {
-            const ctx = chart.ctx;
-            const bar = this._hoverBar;
-            
-            // Draw tooltip
-            const tooltipWidth = 200;
-            const tooltipHeight = 80;
-            const tooltipX = Math.min(
-                Math.max(bar.startX + (bar.endX - bar.startX) / 2 - tooltipWidth / 2, 10),
-                chart.width - tooltipWidth - 10
-            );
-            const tooltipY = bar.topY - tooltipHeight - 10;
-            
-            // Draw tooltip background
-            ctx.save();
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.roundRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight, 5);
-            ctx.fill();
-            ctx.stroke();
-            
-            // Draw tooltip content
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 12px Arial';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'top';
-            
-            // Title
-            ctx.fillText(bar.dataset.label, tooltipX + 10, tooltipY + 10);
-            
-            // Station range
-            ctx.font = '11px Arial';
-            ctx.fillText(`Station: ${formatStation(bar.startStation)} to ${formatStation(bar.endStation)}`, 
-                tooltipX + 10, tooltipY + 30);
-            
-            // Percentage value
-            ctx.fillText(`Percentage Change: ${(bar.barValue * 100).toFixed(3)}%`, 
-                tooltipX + 10, tooltipY + 50);
-            
-            ctx.restore();
-        }
-    },
-    
-    // Handle mouse movement for hover detection
-    beforeEvent: function(chart, args) {
-        const event = args.event;
-        
-        // Only process hover events
-        if (event.type === 'mousemove') {
-            const mouseX = event.x;
-            const mouseY = event.y;
-            
-            // Check if mouse is over any bar
-            let hoveredBar = null;
-            for (const bar of this._bars || []) {
-                if (mouseX >= bar.startX && mouseX <= bar.endX && 
-                    mouseY >= bar.topY && mouseY <= bar.bottomY) {
-                    hoveredBar = bar;
-                    break;
-                }
-            }
-            
-            // Update hover state
-            if (hoveredBar !== this._hoverBar) {
-                this._hoverBar = hoveredBar;
-                chart.render(); // Trigger a redraw to show/hide tooltip
-            }
-        } else if (event.type === 'mouseleave') {
-            // Clear hover state when mouse leaves chart
-            if (this._hoverBar) {
-                this._hoverBar = null;
-                chart.render();
-            }
-        }
-    }
-};
-
-// Register the plugin immediately if Chart.js is loaded
-if (typeof Chart !== 'undefined') {
-    Chart.register(barSpanPlugin);
-}
-
-// DOM elements
-let messageArea = null;
-let fileInput = null;
-let fileStatus = null;
-let dragDropArea = null;
-let parameterSelect = null;
-let processButton = null;
-let downloadButton = null;
-let clearSelectionButton = null;
-let exportFormatSelect = null;
-let chartCanvas = null;
-let dataMapContainer = null;
-let groupNameInput = null;
-let applyGroupBtn = null;
-let groupTogglesContainer = null;
-let outputData = null;
-let ridSelect = null;
-let dataSelectionContainer = null;
-let restorePointsBtn = null;
-let fitScreenBtn = null;
-let isLeftAxisHovered = false;  // Track if left Y-axis is being hovered
-let isRightAxisHovered = false; // Track if right Y-axis is being hovered
-let isXAxisHovered = false;     // Track if X-axis is being hovered
-let zoomStates = {};  // Store zoom states for different RIDs
-
-/**
- * Initializes the map for geographic visualization
- */
-function initializeMap() {
-    // Initialize the map if the map container exists
-    const mapContainer = document.getElementById('data-map');
-    if (mapContainer) {
-        // Create a map centered at a default location
-        map = L.map('data-map').setView([40, -95], 4);
-        
-        // Define base layers
-        const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-            maxZoom: 19
-        });
-        
-        const aerialLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
-            maxZoom: 19
-        });
-        
-        // Define a baseMaps object to hold our base layers
-        const baseMaps = {
-            "Aerial View": aerialLayer,
-            "Street Map": streetLayer
-        };
-        
-        // Add aerial layer to the map by default
-        aerialLayer.addTo(map);
-        
-        // Add layer controls to the map
-        L.control.layers(baseMaps, null, {
-            position: 'topright'
-        }).addTo(map);
-        
-        // Add legend
-        const legend = L.control({position: 'bottomright'});
-        
-        legend.onAdd = function() {
-            const div = L.DomUtil.create('div', 'map-legend');
-            div.innerHTML = `
-                <h4>Map Legend</h4>
-                <div>
-                    <div style="display: inline-block; width: 14px; height: 14px; border-radius: 50%; background-color: #2196F3; border: 1px solid #000; margin-right: 8px;"></div>
-                    SIGNAL Points
-                </div>
-                <div>
-                    <div style="display: inline-block; width: 14px; height: 14px; background-color: #FFA500; transform: rotate(45deg); border: 1px solid #000; margin-right: 8px;"></div>
-                    Point Generic
-                </div>
-                <div>
-                    <div style="display: inline-block; width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 14px solid #4CAF50; margin-right: 8px;"></div>
-                    Setup Location
-                </div>
-            `;
-            return div;
-        };
-        
-        legend.addTo(map);
-        
-        // Add a message for when no geographic data is available
-        const noGeoDataMessage = document.createElement('div');
-        noGeoDataMessage.className = 'no-geo-data-message';
-        noGeoDataMessage.innerHTML = '<p>No geographic data available in the current dataset</p>';
-        mapContainer.appendChild(noGeoDataMessage);
-        noGeoDataMessage.style.display = 'flex';
-    }
-}
-
-// Initialize app when DOM is loaded
+/************************************************************
+ * DOMContentLoaded Listener
+ ************************************************************/
 document.addEventListener('DOMContentLoaded', () => {
-    // Get DOM elements
-    messageArea = document.getElementById('message-area');
-    fileInput = document.getElementById('file-input');
-    fileStatus = document.getElementById('file-status');
-    dragDropArea = document.getElementById('drag-drop-area');
-    processButton = document.getElementById('process-btn');
-    downloadButton = document.getElementById('download-btn');
-    chartCanvas = document.getElementById('data-chart');
-    dataMapContainer = document.getElementById('data-map');
-    groupNameInput = document.getElementById('group-name');
-    applyGroupBtn = document.getElementById('apply-group-btn');
-    groupTogglesContainer = document.getElementById('group-toggles');
-    exportFormatSelect = document.getElementById('export-format');
-    outputData = document.getElementById('output-data');
-    ridSelect = document.getElementById('rid-select');
-    dataSelectionContainer = document.getElementById('data-selection-container');
-    restorePointsBtn = document.getElementById('restore-points-btn');
-    fitScreenBtn = document.getElementById('fit-screen-btn');
-    
-    // Initialize map
-    initializeMap();
-    
-    // Initialize chart plugins
-    initializeChartPlugins();
-    
-    // Set up event listeners
-    setupEventListeners();
+  // Initialize drag-and-drop events for upload area
+  const uploadArea = document.getElementById('upload-area');
+  uploadArea.addEventListener('dragover', handleDragOver);
+  uploadArea.addEventListener('drop', handleDrop);
+  
+  // Add click event listener to the upload button
+  const uploadBtn = document.getElementById('trigger-upload-btn');
+  if (uploadBtn) {
+    uploadBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation(); // Prevent event from bubbling up to upload area
+      const fileInput = document.getElementById('file-input');
+      if (fileInput) {
+        fileInput.click();
+      }
+    });
+  }
+  
+  // Also directly add an event listener to the file input element
+  const fileInput = document.getElementById('file-input');
+  if (fileInput) {
+    fileInput.addEventListener('change', function() {
+      console.log("File input change event triggered");
+      handleFileSelection(this.files);
+    });
+  }
+
+  // Check for required libraries and set up initialization
+  initializeApp();
 });
 
-/**
- * Initializes Chart.js plugins for selection functionality
- */
-function initializeChartPlugins() {
-    // We'll use direct event listeners instead of Chart.js plugins
-    // to avoid infinite recursion issues
+/************************************************************
+ * App Initialization
+ ************************************************************/
+function initializeApp() {
+  // Track initialization status
+  let initialized = false;
+  let checkCount = 0;
+  const maxChecks = 20;
+  const checkInterval = 250; // ms
+  
+  // Function to check if required libraries are loaded
+  function checkLibraries() {
+    checkCount++;
     
-    // Add direct event listeners to the canvas for better control
-    if (chartCanvas) {
-        chartCanvas.addEventListener('mousedown', handleChartMouseDown);
-        chartCanvas.addEventListener('mousemove', handleChartMouseMove);
-        chartCanvas.addEventListener('mouseup', handleChartMouseUp);
-        chartCanvas.addEventListener('mouseleave', handleChartMouseLeave);
-        // Removed: chartCanvas.addEventListener('click', handlePointRemoval);
-    }
-}
-
-/**
- * Handles mouse down event on chart
- */
-function handleChartMouseDown(event) {
-    if (!chart) return;
+    // Check if all required libraries are available
+    const plotlyReady = typeof Plotly !== 'undefined';
+    const xlsxReady = typeof XLSX !== 'undefined';
+    const leafletReady = typeof L !== 'undefined';
     
-    // If R key is pressed, handle point removal instead of selection
-    if (isRKeyPressed) {
-        console.log('Chart clicked while R key is pressed');
-        handlePointRemoval(event);
-        return;
+    console.log(`Library check #${checkCount}: Plotly: ${plotlyReady}, XLSX: ${xlsxReady}, Leaflet: ${leafletReady}`);
+    
+    // If we have librariesLoaded tracking object from the HTML, use that information
+    if (window.librariesLoaded) {
+      console.log("Library load status:", window.librariesLoaded);
     }
     
-    const rect = chartCanvas.getBoundingClientRect();
-    dragStart = {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top
-    };
-    isSelecting = true;
-    selectedArea = null;
-}
-
-/**
- * Handles mouse move event on chart
- */
-function handleChartMouseMove(event) {
-    if (!chart || !isSelecting || isUpdating) return;
-    
-    const rect = chartCanvas.getBoundingClientRect();
-    selectedArea = {
-        x1: dragStart.x,
-        y1: dragStart.y,
-        x2: event.clientX - rect.left,
-        y2: event.clientY - rect.top
-    };
-    
-    // Request animation frame for smoother drawing
-    if (!animationFrameId) {
-        animationFrameId = requestAnimationFrame(() => {
-            // Draw selection rectangle without updating the chart
-            drawSelectionRectangle();
-            animationFrameId = null;
-        });
-    }
-}
-
-/**
- * Draws the selection rectangle on the chart canvas
- */
-function drawSelectionRectangle() {
-    if (!chart || !selectedArea) return;
-    
-    // Get the chart context
-    const ctx = chart.ctx;
-    
-    // Save the current state
-    ctx.save();
-    
-    // Clear the canvas and redraw the chart
-    chart.draw();
-    
-    // Draw the selection rectangle with more visible colors
-    ctx.fillStyle = 'rgba(255, 165, 0, 0.3)'; // Orange with transparency
-    ctx.strokeStyle = 'rgba(255, 165, 0, 0.8)'; // Orange border
-    ctx.lineWidth = 2; // Thicker border
-    
-    const width = selectedArea.x2 - selectedArea.x1;
-    const height = selectedArea.y2 - selectedArea.y1;
-    
-    ctx.fillRect(selectedArea.x1, selectedArea.y1, width, height);
-    ctx.strokeRect(selectedArea.x1, selectedArea.y1, width, height);
-    
-    // Restore the context
-    ctx.restore();
-}
-
-/**
- * Handles mouse up event on chart
- */
-function handleChartMouseUp(event) {
-    if (!chart || !isSelecting) return;
-    
-    if (selectedArea) {
-        const rect = chartCanvas.getBoundingClientRect();
-        selectedArea.x2 = event.clientX - rect.left;
-        selectedArea.y2 = event.clientY - rect.top;
-        
-        // Convert pixel coordinates to data values
-        const xScale = chart.scales.x;
-        const yScale = chart.scales.y;
-        
-        const x1Value = xScale.getValueForPixel(selectedArea.x1);
-        const x2Value = xScale.getValueForPixel(selectedArea.x2);
-        const y1Value = yScale.getValueForPixel(selectedArea.y1);
-        const y2Value = yScale.getValueForPixel(selectedArea.y2);
-        
-        // Ensure correct order
-        const minX = Math.min(x1Value, x2Value);
-        const maxX = Math.max(x1Value, x2Value);
-        const minY = Math.min(y1Value, y2Value);
-        const maxY = Math.max(y1Value, y2Value);
-        
-        // Find data points in the selected area
-        // Use filteredData if available, otherwise use parsedData
-        const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-        
-        // Determine which parameter to use for the y-axis (prefer current if available)
-        const displayParameter = dataToUse.some(point => point.current !== undefined) ? 'current' : activeParameter;
-        console.log('Using display parameter for selection:', displayParameter);
-        
-        // Get all points in the selected area
-        const pointsInArea = dataToUse.filter(point => {
-            const pointValue = point[displayParameter] !== undefined ? 
-                point[displayParameter] : point[activeParameter];
-            
-            return point.station >= minX && 
-                   point.station <= maxX && 
-                   pointValue >= minY && 
-                   pointValue <= maxY;
-        });
-        
-        // Check if we're in edit mode (shift key pressed)
-        const isRemoveMode = event.shiftKey;
-        
-        // If we're in remove mode, remove the selected points from the current selection
-        if (isRemoveMode) {
-            selectedDataPoints = selectedDataPoints.filter(selectedPoint => 
-                !pointsInArea.some(point => point.station === selectedPoint.station)
-            );
-        } else {
-            // Check for points already in groups
-            const pointsAlreadyInGroups = [];
-            const newPointsToAdd = [];
-            
-            pointsInArea.forEach(point => {
-                let isInGroup = false;
-                
-                // Check if this point is already in any group
-                for (const group of customGroups) {
-                    if (currentRID && group.rid === currentRID && 
-                        group.points.some(p => p.station === point.station)) {
-                        pointsAlreadyInGroups.push(point);
-                        isInGroup = true;
-                        break;
-                    }
-                }
-                
-                // Only add if not already in the selection
-                if (!selectedDataPoints.some(selectedPoint => selectedPoint.station === point.station)) {
-                    if (!isInGroup) {
-                        newPointsToAdd.push(point);
-                    }
-                }
-            });
-            
-            // Add new points to selection
-            selectedDataPoints = [...selectedDataPoints, ...newPointsToAdd];
-            
-            // Show warning if some points were already in groups
-            if (pointsAlreadyInGroups.length > 0) {
-                showMessage(`${pointsAlreadyInGroups.length} points are already in groups and will be skipped.`, 'warning');
-            }
+    // Check if Leaflet loaded after initialization and we haven't initialized the map yet
+    if (initialized && leafletReady && !mapInitialized) {
+      console.log("Leaflet loaded after initial app initialization. Initializing map now.");
+      initMap();
+      if (filteredData && filteredData.length > 0) {
+        // If we already have data, update the map
+        try {
+          console.log("Updating map with existing data after late Leaflet initialization");
+          setTimeout(() => updateMapWithAllData(filteredData.filter(d => !d.removed)), 500);
+        } catch (e) {
+          console.warn("Error updating map with existing data:", e);
         }
-        
-        // Update the chart to show the selection
-        updateSelectionDisplay();
-        
-        // Update selection details
-        updateSelectionDetails();
-        
-        // Enable group controls if we have selected points
-        if (selectedDataPoints.length > 0) {
-            if (groupNameInput) {
-                groupNameInput.disabled = false;
-                
-                // Set default group name if the input is empty
-                if (!groupNameInput.value.trim()) {
-                    const nextGroupNumber = customGroups.filter(g => g.rid === currentRID).length + 1;
-                    groupNameInput.value = `Group ${nextGroupNumber}`;
-                }
-            }
-            if (applyGroupBtn) applyGroupBtn.disabled = false;
-        } else {
-            if (groupNameInput) groupNameInput.disabled = true;
-            if (applyGroupBtn) applyGroupBtn.disabled = true;
+      }
+    }
+    
+    if (plotlyReady && xlsxReady) {
+      // Essential libraries are loaded, proceed with initialization
+      console.log("Essential libraries loaded successfully");
+      
+      // Initialize basic features
+      createEmptyPlot();
+      
+      // Initialize Leaflet map if available, otherwise hide the map section
+      if (leafletReady) {
+        console.log("Leaflet library loaded successfully");
+        initMap();
+      } else {
+        console.warn("Leaflet library not loaded. Map functionality will be disabled.");
+        // Don't hide the map section, but add a message
+        const mapContainer = document.getElementById('map');
+        if (mapContainer) {
+          mapContainer.innerHTML = `
+            <div style="display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; background: rgba(0,0,0,0.05);">
+              <i class="fa fa-map-marker" style="font-size: 48px; margin-bottom: 16px; color: #666;"></i>
+              <p style="text-align: center; max-width: 70%;">
+                Map functionality is temporarily unavailable.<br>
+                Please refresh the page to try again.
+              </p>
+            </div>
+          `;
         }
+        console.log("Will check for Leaflet in subsequent checks");
+      }
+      
+      // Enable the file upload interaction
+      const uploadArea = document.getElementById('upload-area');
+      const loadingIndicator = document.getElementById('upload-loading');
+      
+      if (loadingIndicator) {
+        loadingIndicator.style.display = 'none';
+      }
+      
+      uploadArea.style.opacity = "1";
+      uploadArea.style.pointerEvents = "auto";
+      
+      initialized = true;
+      return; // No need to check again, we're initialized
     }
     
-    // Reset selection state
-    isSelecting = false;
-    selectedArea = null;
-    
-    // Cancel any pending animation frame
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
+    // If still not ready, check again in a moment
+    if (!initialized && checkCount < 20) {
+      setTimeout(checkLibraries, checkInterval);
+    } else if (!initialized) {
+      console.error(`Failed to load essential libraries after ${checkCount} attempts`);
+      
+      // Still enable the UI, but with limited functionality
+      const uploadArea = document.getElementById('upload-area');
+      const loadingIndicator = document.getElementById('upload-loading');
+      
+      if (loadingIndicator) {
+        loadingIndicator.innerHTML = '<i class="fa fa-exclamation-triangle"></i> <span>Some features may not work properly. Try refreshing the page.</span>';
+      }
+      
+      uploadArea.style.opacity = "1";
+      uploadArea.style.pointerEvents = "auto";
     }
-    
-    // Redraw the chart to clear the selection rectangle
-    if (chart) {
-        chart.draw();
-    }
-}
-
-/**
- * Handles point removal when clicking on a point while the R key is pressed
- * @param {MouseEvent} event - The mouse click event
- */
-function handlePointRemoval(event) {
-    console.log('Point removal handler called, R key pressed:', isRKeyPressed);
-    if (!chart || !isRKeyPressed) return; // Restore the isRKeyPressed check
-    
-    // Get mouse position relative to canvas
-    const rect = chartCanvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    
-    console.log('Click position:', x, y);
-    
-    // Convert pixel coordinates to data values
-    const xScale = chart.scales.x;
-    const yScale = chart.scales.y;
-    const xValue = xScale.getValueForPixel(x);
-    const yValue = yScale.getValueForPixel(y);
-    
-    console.log('Data values:', xValue, yValue);
-    
-    // Use filteredData if available, otherwise use parsedData
-    const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-    console.log('Data points to search:', dataToUse.length);
-    
-    // Determine which parameter to use for the y-axis (prefer current if available)
-    const displayParameter = dataToUse.some(point => point.current !== undefined) ? 'current' : activeParameter;
-    console.log('Using display parameter:', displayParameter);
-    
-    // Find the closest point to the click
-    let closestPoint = null;
-    let minDistance = Infinity;
-    
-    dataToUse.forEach(point => {
-        // Skip points that are already removed
-        if (removedPoints.some(p => p.station === point.station)) return;
-        
-        // Calculate distance between click and point
-        const dx = Math.abs(point.station - xValue);
-        const pointValue = point[displayParameter] !== undefined ? point[displayParameter] : point[activeParameter];
-        const dy = Math.abs(pointValue - yValue);
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        // Check if this point is closer than the current closest
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestPoint = point;
-        }
+  }
+  
+  // Create an empty Plotly chart
+  function createEmptyPlot() {
+    const plotDiv = document.getElementById('plotly-chart');
+    Plotly.newPlot(plotDiv, [], {
+      title: 'PCM Signal Analysis',
+      xaxis: { title: 'Station' },
+      yaxis: { title: 'Signal (mV)' },
+      margin: { t: 50, r: 50, b: 80, l: 80 }
     });
     
-    console.log('Closest point found:', closestPoint ? `Station: ${closestPoint.station}, Distance: ${minDistance}` : 'None');
-    
-    // Define a threshold for how close the click needs to be to a point
-    // This is in data units, not pixels
-    const clickThreshold = {
-        x: Math.abs(xScale.getValueForPixel(x + 10) - xScale.getValueForPixel(x)),
-        y: Math.abs(yScale.getValueForPixel(y + 10) - yScale.getValueForPixel(y))
-    };
-    
-    console.log('Click threshold:', clickThreshold);
-    
-    // Check if we found a point and it's close enough to the click
-    if (closestPoint) {
-        const xDiff = Math.abs(closestPoint.station - xValue);
-        const pointValue = closestPoint[displayParameter] !== undefined ? 
-            closestPoint[displayParameter] : closestPoint[activeParameter];
-        const yDiff = Math.abs(pointValue - yValue);
-        console.log('Point differences:', {
-            x: xDiff, 
-            y: yDiff, 
-            xThreshold: clickThreshold.x * 10, // Increased from 5 to 10
-            yThreshold: clickThreshold.y * 10, // Increased from 5 to 10
-            withinThreshold: xDiff < clickThreshold.x * 10 && yDiff < clickThreshold.y * 10
-        });
-        
-        if (xDiff < clickThreshold.x * 10 && yDiff < clickThreshold.y * 10) { // Increased from 5 to 10
-            console.log('Point will be removed:', closestPoint);
-            // Add to removed points
-            removedPoints.push({...closestPoint});
-            
-            // Remove from selection if it's selected
-            selectedDataPoints = selectedDataPoints.filter(p => p.station !== closestPoint.station);
-            
-            // Update the chart
-            safeChartUpdate();
-            
-            // Enable restore button
-            if (restorePointsBtn) {
-                restorePointsBtn.disabled = false;
-            }
-            
-            // Enable fit to screen button
-            if (fitScreenBtn) {
-                fitScreenBtn.disabled = false;
-            }
-            
-            // Show message
-            showMessage(`Point at station ${formatStation(closestPoint.station)} removed from chart view. It will still be included in exports.`, 'success');
-        }
-    }
+    // Attach event listeners for chart
+    plotDiv.on('plotly_selected', handlePlotSelection);
+    plotDiv.on('plotly_click', handlePlotClick);
+  }
+
+  // Add initial styles to upload area to show it's disabled while libraries load
+  const uploadArea = document.getElementById('upload-area');
+  uploadArea.style.opacity = "0.5";
+  uploadArea.style.pointerEvents = "none";
+  
+  // Start checking for libraries
+  checkLibraries();
 }
 
-/**
- * Handles mouse leave event on chart
- */
-function handleChartMouseLeave() {
-    if (isSelecting) {
-        isSelecting = false;
-        selectedArea = null;
-        if (chart) {
-            safeChartUpdate();
-        }
-    }
+/************************************************************
+ * File Selection / Drag-and-Drop
+ ************************************************************/
+function handleDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
 }
 
-/**
- * Safely updates the chart to prevent recursive updates
- */
-function safeChartUpdate() {
-    if (isUpdating || !chart) return;
-    
-    isUpdating = true;
-    
-    try {
-        // Refresh the chart to show selection
-        // Use filteredData if available, otherwise use parsedData
-        const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-        
-        try {
-            updateChart(dataToUse);
-        } catch (error) {
-            console.error('Error updating chart:', error);
-            showMessage('Error updating chart: ' + error.message, 'error');
-        }
-    } catch (error) {
-        console.error('Error in safeChartUpdate:', error);
-    } finally {
-        isUpdating = false;
-    }
+function handleDrop(e) {
+  e.preventDefault();
+  const files = e.dataTransfer.files;
+  handleFileSelection(files);
 }
 
-/**
- * Handles the data processing when the user clicks the process button
- */
-function handleProcessData() {
-    if (fileInput.files && fileInput.files.length > 0) {
-        processFile(fileInput.files[0]);
-    } else {
-        showMessage('Please select a file first.', 'error');
-    }
-}
-
-/**
- * Handles file selection from either drag-drop or file input
- * @param {FileList} files - The selected files
- */
 function handleFileSelection(files) {
-    if (!files || files.length === 0) {
-        return;
-    }
-    
-    const file = files[0];
-    
-    // Check if file is Excel (.xlsx)
-    if (!file.name.toLowerCase().endsWith('.xlsx')) {
-        showMessage('Please select an Excel (.xlsx) file.', 'error');
-        fileStatus.textContent = 'Invalid file type. Please select an Excel (.xlsx) file.';
-        return;
-    }
-    
-    // Update file status
-    fileStatus.textContent = `Selected: ${file.name}`;
-    
-    // Automatically process the file
-    processFile(file);
+  if (!files || files.length === 0) return;
+  const file = files[0];
+
+  // Display file information
+  const fileInfoDiv = document.getElementById('file-info');
+  const fileNameElement = document.getElementById('file-name');
+  
+  // Show the file info area
+  fileInfoDiv.style.display = 'block';
+  
+  // Display file name and details
+  fileNameElement.textContent = `File: ${file.name} (${formatFileSize(file.size)})`;
+  fileNameElement.innerHTML = `<strong>File:</strong> ${file.name} <span class="file-size">(${formatFileSize(file.size)})</span>`;
+  
+  // Clear data points info until we finish processing
+  document.getElementById('data-points-info').textContent = 'Processing file...';
+
+  // Process the file
+  processFile(file);
 }
 
-/**
- * Processes the uploaded file and extracts data
- * @param {File} file - The uploaded file
- */
+// Helper function to format file size
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 function processFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const data = new Uint8Array(e.target.result);
     try {
-        // Show loading message
-        showMessage('Processing data...', 'success');
+      const workbook = XLSX.read(data, { type: 'array' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { raw: true });
+      console.log(`Processed ${jsonData.length} rows from Excel file`);
+      
+      // Debug: Log the first row to see all original fields
+      if (jsonData.length > 0) {
+        console.log("ORIGINAL EXCEL DATA (first row):", jsonData[0]);
+        console.log("Original column count:", Object.keys(jsonData[0]).length);
+      }
+      
+      // Store the original column order and the full original data
+      if (jsonData.length > 0) {
+        originalColumns = Object.keys(jsonData[0]);
+        console.log("Original column order:", originalColumns);
+      }
+      
+      // Store the original complete data for later export
+      window.originalExcelData = jsonData;
+      
+      parsedData = parseExcelData(jsonData);
+
+      // Debug: Compare original data with our parsed data
+      if (parsedData.length > 0 && jsonData.length > 0) {
+        console.log("PARSED DATA (first row):", parsedData[0]);
+        console.log("Parsed data field count:", Object.keys(parsedData[0]).length);
         
-        // Read file content
-        const reader = new FileReader();
-        
-        reader.onload = function(e) {
-            try {
-                // Parse Excel file content
-                const data = new Uint8Array(e.target.result);
-                const workbook = XLSX.read(data, { type: 'array' });
-                
-                // Get the first worksheet
-                const firstSheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[firstSheetName];
-                
-                // Convert to JSON
-                const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-                
-                if (jsonData.length <= 1) { // Check if there's only a header row or less
-                    showMessage('No valid data found in the file.', 'error');
-                    return;
-                }
-                
-                // Process the Excel data
-                parsedData = parseExcelData(jsonData);
-                
-                if (parsedData.length === 0) {
-                    showMessage('No valid data found in the file.', 'error');
-                    return;
-                }
-                
-                // Check if we have RID data and populate the dropdown
-                const ridSelect = document.getElementById('rid-select');
-                const dataSelectionContainer = document.getElementById('data-selection-container');
-                
-                // Get unique RIDs
-                const uniqueRIDs = [...new Set(parsedData.map(item => item.rid).filter(rid => rid !== undefined))];
-                
-                if (uniqueRIDs.length > 0) {
-                    // Show the RID selection container
-                    if (dataSelectionContainer) {
-                        dataSelectionContainer.style.display = 'block';
-                    }
-                    
-                    // Clear existing options except the first one
-                    if (ridSelect) {
-                        while (ridSelect.options.length > 1) {
-                            ridSelect.remove(1);
-                        }
-                        
-                        // Add options for each unique RID
-                        uniqueRIDs.forEach(rid => {
-                            const option = document.createElement('option');
-                            option.value = rid;
-                            option.textContent = `RID: ${rid}`;
-                            ridSelect.appendChild(option);
-                        });
-                        
-                        // Enable the dropdown
-                        ridSelect.disabled = false;
-                        
-                        // Add event listener for RID selection
-                        ridSelect.addEventListener('change', handleRIDSelection);
-                        
-                        // Show message to select a RID
-                        showMessage('Please select a data set (RID) to continue.', 'info');
-                        
-                        // Don't process data yet - wait for RID selection
-                        return;
-                    }
-                } else {
-                    // No RID data, hide the selection container
-                    if (dataSelectionContainer) {
-                        dataSelectionContainer.style.display = 'none';
-                    }
-                    
-                    // Process all data
-                    organizeDataParameters(parsedData);
-                    processAndDisplayData(parsedData);
-                }
-                
-                // Enable manual grouping controls
-                if (applyGroupBtn) applyGroupBtn.disabled = false;
-                
-                // Enable suggest groups button
-                if (applyGroupBtn) applyGroupBtn.disabled = false;
-                
-                // Grouping controls remain disabled until selection is made
-                if (groupNameInput) groupNameInput.disabled = true;
-                
-                // Enable download button
-                if (downloadButton) downloadButton.disabled = false;
-                
-                showMessage('Data processed successfully.', 'success');
-            } catch (error) {
-                console.error('Error processing file:', error);
-                showMessage(`Error processing file: ${error.message}`, 'error');
-            }
-        };
-        
-        reader.onerror = function() {
-            showMessage('Error reading file.', 'error');
-        };
-        
-        reader.readAsArrayBuffer(file);
+        // Check what fields might be missing
+        const originalFields = new Set(Object.keys(jsonData[0]));
+        const parsedFields = new Set(Object.keys(parsedData[0]));
+        const missingFields = [...originalFields].filter(field => !parsedFields.has(field));
+        console.log("Fields not preserved in parsed data:", missingFields);
+      }
+
+      // Update data points info with statistics
+      updateDataPointsInfo(parsedData);
+      
+      // Populate RID dropdown if multiple RIDs exist
+      populateRIDSelector();
+      showMessage('File processed successfully!', 'success');
     } catch (error) {
-        console.error('Error processing file:', error);
-        showMessage(`Error processing file: ${error.message}`, 'error');
+      console.error("Error processing file:", error);
+      document.getElementById('data-points-info').innerHTML = 
+        `<div class="error-message"><i class="fa fa-exclamation-triangle"></i> Error: ${error.message}</div>`;
+      showMessage(`Error processing file: ${error.message}`, 'error');
     }
+  };
+
+  reader.onerror = (error) => {
+    console.error("FileReader error:", error);
+    document.getElementById('data-points-info').innerHTML = 
+      `<div class="error-message"><i class="fa fa-exclamation-triangle"></i> Error reading file</div>`;
+    showMessage('Error reading file. Please try again.', 'error');
+  };
+  
+  console.log("Starting to read file...");
+  reader.readAsArrayBuffer(file);
 }
 
-/**
- * Parses Excel data from SheetJS into a structured format
- * @param {Array} jsonData - The JSON data from SheetJS
- * @returns {Array} - Structured data array
- */
+// Function to update data points info in the UI
+function updateDataPointsInfo(data) {
+  const infoElement = document.getElementById('data-points-info');
+  
+  if (!data || data.length === 0) {
+    infoElement.innerHTML = '<div class="warning-message">No data points found in file.</div>';
+    return;
+  }
+  
+  // Count unique RIDs
+  const rids = [...new Set(data.map(point => point.rid))].filter(Boolean);
+  
+  // Count point types
+  const pointTypes = {};
+  data.forEach(point => {
+    // Find point type from various possible fields, trying both camel case and uppercase versions
+    let type = 'Unknown';
+    
+    if (point.pointType) {
+      type = point.pointType;
+    } else if (point.POINTTYPE) {
+      type = point.POINTTYPE;
+    } else if (point.pointtype) {
+      type = point.pointtype;
+    } else if (point.POINT_TYPE) {
+      type = point.POINT_TYPE;
+    } else if (point.point_type) {
+      type = point.point_type;
+    } else {
+      // Try to find any key that might contain point type information
+      const pointTypeKey = Object.keys(point).find(key => 
+        key.toLowerCase() === 'pointtype' || 
+        key.toLowerCase() === 'point_type' || 
+        key.toLowerCase() === 'type'
+      );
+      
+      if (pointTypeKey && point[pointTypeKey]) {
+        type = point[pointTypeKey];
+      }
+    }
+    
+    pointTypes[type] = (pointTypes[type] || 0) + 1;
+  });
+  
+  // Format the point types
+  const pointTypesFormatted = Object.entries(pointTypes)
+    .map(([type, count]) => `${type}: ${count}`)
+    .join(', ');
+  
+  // Build info HTML
+  infoElement.innerHTML = `
+    <div class="data-stats">
+      <div class="stat-row"><strong>Total Points:</strong> ${data.length}</div>
+      <div class="stat-row"><strong>Route IDs:</strong> ${rids.length} (${rids.join(', ')})</div>
+      <div class="stat-row"><strong>Point Types:</strong> ${pointTypesFormatted}</div>
+      <div class="stat-row"><strong>Station Range:</strong> ${formatStation(Math.min(...data.map(p => p.station)))} to ${formatStation(Math.max(...data.map(p => p.station)))}</div>
+    </div>
+  `;
+}
+
+/************************************************************
+ * Parse Excel Data
+ ************************************************************/
 function parseExcelData(jsonData) {
-    const data = [];
+  const result = [];
+  
+  if (!jsonData || !Array.isArray(jsonData)) {
+    console.error("Invalid data format received from Excel file");
+    return result;
+  }
+  
+  console.log("Parsing Excel data with", jsonData.length, "rows");
+  
+  // Debug: Examine the first few rows to understand the structure
+  if (jsonData.length > 0) {
+    console.log("First Excel row keys:", Object.keys(jsonData[0]));
+    console.log("Sample values from first row:", 
+      Object.fromEntries(
+        Object.entries(jsonData[0]).slice(0, 5) // Just show first 5 entries to avoid cluttering console
+      )
+    );
     
-    // Check if first row is a header (it should be)
-    const headers = jsonData[0].map(h => String(h).trim().toLowerCase());
+    // Check for any 'null' or 'undefined' string values that might cause issues
+    const problematicFields = Object.entries(jsonData[0])
+      .filter(([key, value]) => value === 'null' || value === 'undefined')
+      .map(([key]) => key);
     
-    // Find required columns (MEAS for station, SIGNAL for value)
-    const stationIndex = headers.findIndex(h => h === 'meas');
-    // Look for exact match first, then fall back to includes if not found
-    let valueIndex = headers.findIndex(h => h === 'signal');
-    if (valueIndex === -1) {
-        // If exact match not found, try case-insensitive includes
-        valueIndex = headers.findIndex(h => h.includes('signal'));
-        console.log('Exact "signal" column not found, using column that includes "signal":', 
-            valueIndex !== -1 ? jsonData[0][valueIndex] : 'None found');
+    if (problematicFields.length > 0) {
+      console.warn("Fields with 'null' or 'undefined' string values:", problematicFields);
     }
-    const pointTypeIndex = headers.findIndex(h => h === 'pointtype');
-    const xIndex = headers.findIndex(h => h === 'x');
-    const yIndex = headers.findIndex(h => h === 'y');
-    const ridIndex = headers.findIndex(h => h === 'rid');
-    const createdOnIndex = headers.findIndex(h => h === 'createdon');
-    
-    // Log column indices for debugging
-    console.log('Column indices:', {
-        station: stationIndex,
-        value: valueIndex,
-        pointType: pointTypeIndex,
-        x: xIndex,
-        y: yIndex,
-        rid: ridIndex,
-        createdOn: createdOnIndex
+  }
+  
+  // Debug: Check for date-related fields in the data
+  if (jsonData.length > 0) {
+    const sampleRow = jsonData[0];
+    const dateTimeFields = Object.keys(sampleRow).filter(key => 
+      key.toLowerCase().includes('date') || 
+      key.toLowerCase().includes('time') || 
+      key.toLowerCase().includes('created') ||
+      key.toLowerCase().includes('create')
+    );
+    console.log("Found date/time related fields in Excel:", dateTimeFields);
+    console.log("Sample data for those fields:", dateTimeFields.reduce((obj, key) => {
+      obj[key] = sampleRow[key];
+      return obj;
+    }, {}));
+  }
+  
+  // Track special points for logging
+  let specialPointsCount = 0;
+  let standardPointsCount = 0;
+  
+  // Create a field preservation tracker
+  const fieldTracker = {};
+  if (jsonData.length > 0) {
+    Object.keys(jsonData[0]).forEach(key => {
+      fieldTracker[key] = { count: 0, preserved: 0 };
     });
-    
-    if (stationIndex === -1 || valueIndex === -1) {
-        showMessage('Required columns (MEAS, SIGNAL) not found in the Excel file.', 'error');
-        return [];
-    }
-    
-    // Process each row (skip header)
-    for (let i = 1; i < jsonData.length; i++) {
-        const row = jsonData[i];
+  }
+  
+  for (const row of jsonData) {
+    try {
+      // Track which fields are present in this row
+      Object.keys(row).forEach(key => {
+        if (fieldTracker[key]) {
+          fieldTracker[key].count++;
+        } else {
+          fieldTracker[key] = { count: 1, preserved: 0 };
+        }
+      });
+      
+      // Extract essential fields we need for functionality
+      let stationVal = parseFloat(row['MEAS'] || row['STATION'] || 0);
+      if (isNaN(stationVal)) stationVal = 0;
+      
+      let signalVal = row['SIGNAL'] !== undefined ? parseFloat(row['SIGNAL']) : null;
+      if (signalVal !== null && isNaN(signalVal)) signalVal = 0;
+      
+      // Enhanced point type extraction with case-insensitive lookup
+      let pointType = 'N/A';
+      
+      // First check common field names case-sensitively for performance
+      if (row['POINTTYPE'] !== undefined) pointType = String(row['POINTTYPE']);
+      else if (row['POINT_TYPE'] !== undefined) pointType = String(row['POINT_TYPE']);
+      else if (row['TYPE'] !== undefined) pointType = String(row['TYPE']);
+      else {
+        // Try to find a field with a case-insensitive match
+        const pointTypeKey = Object.keys(row).find(key => 
+          key.toUpperCase() === 'POINTTYPE' || 
+          key.toUpperCase() === 'POINT_TYPE' || 
+          key.toUpperCase() === 'TYPE'
+        );
         
-        // Skip empty rows
-        if (!row || row.length === 0) continue;
+        if (pointTypeKey && row[pointTypeKey] !== undefined) {
+          pointType = String(row[pointTypeKey]);
+        }
+      }
+      
+      let ridVal = row['RID'] ? String(row['RID']) : 'DEFAULT';
+      
+      let xVal = parseFloat(row['X'] || row['LONGITUDE'] || row['LON'] || 0);
+      if (isNaN(xVal)) xVal = 0;
+      
+      let yVal = parseFloat(row['Y'] || row['LATITUDE'] || row['LAT'] || 0);
+      if (isNaN(yVal)) yVal = 0;
+
+      // Check if this is a special point type that should be included even with blank/invalid signal
+      const pointTypeUpper = (pointType || '').toString().toUpperCase().trim();
+      const isSpecialPointType = pointTypeUpper === 'POINT GENERIC' || 
+                                 pointTypeUpper === 'SETUP LOCATION';
+      
+      // For special point types, log but don't treat as warning
+      if (signalVal === null || signalVal <= 0) {
+        if (isSpecialPointType) {
+          console.log(`Special point type '${pointType}' found with null/invalid signal at station ${stationVal}`);
+        } else {
+          console.warn(`Invalid or missing signal value: ${signalVal}`);
+        }
+      }
+
+      // Calculate current in dBmA: 20 * LOG10(signalVal)
+      // If signalVal is 0 or negative, handle gracefully
+      let currentVal = null;
+      if (signalVal > 0) {
+        try {
+          currentVal = (Math.log10(signalVal) * 20);
+          // Check if the result is valid
+          if (isNaN(currentVal) || !isFinite(currentVal)) {
+            console.warn(`Invalid current calculation result for signal: ${signalVal}, result: ${currentVal}`);
+            currentVal = null;
+          }
+        } catch (error) {
+          console.warn(`Error calculating current for signal: ${signalVal}`, error);
+          currentVal = null;
+        }
+      }
+
+      // Determine if we should add this data point
+      const hasValidStationAndCurrent = stationVal !== null && stationVal !== undefined && !isNaN(stationVal) && 
+                                       currentVal !== null && currentVal !== undefined && !isNaN(currentVal);
+      
+      // Add point if it has valid station/current OR it's a special point type with valid station
+      if (hasValidStationAndCurrent || (isSpecialPointType && stationVal !== null && !isNaN(stationVal))) {
+        // Create a new dataPoint with all original row data first
+        const dataPoint = {...row};
         
-        const dataPoint = {};
-        
-        // Map all columns to properties
-        headers.forEach((header, index) => {
-            if (index < row.length && row[index] !== undefined) {
-                // Try to convert to number if possible, except for date fields
-                if (header === 'createdon') {
-                    // Keep as string or convert to Date object if needed
-                    dataPoint[header] = row[index];
-                } else {
-                    const value = parseFloat(row[index]);
-                    dataPoint[header] = isNaN(value) ? row[index] : value;
-                }
-            }
+        // Track which fields are preserved
+        Object.keys(row).forEach(key => {
+          if (fieldTracker[key]) {
+            fieldTracker[key].preserved++;
+          }
         });
         
-        // Ensure required fields exist and map to standard names
-        if (row[stationIndex] !== undefined) {
-            // Map MEAS to station
-            dataPoint.station = parseFloat(row[stationIndex]);
+        // Then add our processed fields, which may override some original fields
+        dataPoint.station = stationVal;
+        dataPoint.signal = signalVal;
+        dataPoint.current = currentVal;
+        dataPoint.pointType = pointType;
+        dataPoint.x = xVal;  // Usually longitude
+        dataPoint.y = yVal;  // Usually latitude
+        dataPoint.longitude = xVal;
+        dataPoint.latitude = yVal;
+        dataPoint.rid = ridVal;
+        dataPoint.group = null; // To be assigned by user if needed
+        dataPoint.removed = false; // Track if point is removed
+        dataPoint.isSpecialPoint = isSpecialPointType; // Flag for special point types
+        
+        // Add any fields from the metadataFields list that exist in the row
+        // Note: This is redundant now that we copy all fields, but keeping for any special processing
+        const metadataFields = [
+          'SURVEYOR', 'COLLECTOR', 'DATE', 'TIME', 'CREATEDON', 'CREATED_ON',
+          'MEAS', 'DIRECTIONOFSIGNAL', 'DIRECTION_OF_SIGNAL',
+          'MEASUREMENT_TYPE', 'SIGNAL_COMMENT'
+        ];
+        
+        metadataFields.forEach(field => {
+          // Check if the field exists in the row (using case-insensitive match)
+          const foundKey = Object.keys(row).find(key => key.toUpperCase() === field);
+          if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && row[foundKey] !== '') {
+            // Use camelCase for consistent property naming
+            let camelCaseKey = foundKey.toLowerCase().replace(/(_)([a-z])/g, (m, p1, p2) => p2.toUpperCase());
             
-            // Map SIGNAL to value and signal
-            if (row[valueIndex] !== undefined) {
-                const signalValue = parseFloat(row[valueIndex]);
-                dataPoint.value = signalValue;
-                dataPoint.signal = signalValue; // Add signal property for consistency
-                
-                // Calculate current in dBmA using the formula: LOG10(signal_value) * 20
-                if (signalValue > 0) {
-                    dataPoint.current = Math.log10(signalValue) * 20;
-                } else {
-                    // Handle zero or negative values (log10 is undefined for these)
-                    dataPoint.current = -60; // Default low value for zero/negative signals
-                    console.log(`Warning: Non-positive signal value (${signalValue}) at station ${dataPoint.station}, using default current value`);
-                }
+            // Special handling for direction of signal field
+            if (field === 'DIRECTIONOFSIGNAL' || field === 'DIRECTION_OF_SIGNAL') {
+              camelCaseKey = 'directionOfSignal';
             }
             
-            // Map X, Y to latitude, longitude if they exist
-            if (xIndex !== -1 && yIndex !== -1 && row[xIndex] !== undefined && row[yIndex] !== undefined) {
-                // Store both original X/Y and mapped latitude/longitude
-                dataPoint.x = parseFloat(row[xIndex]);
-                dataPoint.y = parseFloat(row[yIndex]);
-                dataPoint.longitude = parseFloat(row[xIndex]);
-                dataPoint.latitude = parseFloat(row[yIndex]);
-                
-                console.log(`Row ${i}: Mapped coordinates - X: ${dataPoint.x}, Y: ${dataPoint.y}, Lat: ${dataPoint.latitude}, Lng: ${dataPoint.longitude}`);
+            // Handle collector/surveyor consistently
+            if (field === 'SURVEYOR' || field === 'COLLECTOR') {
+              // Use 'collector' as the standard key for both
+              camelCaseKey = 'collector';
             }
             
-            // Add pointtype if it exists
-            if (pointTypeIndex !== -1 && row[pointTypeIndex] !== undefined) {
-                dataPoint.pointtype = row[pointTypeIndex];
+            // Handle created on field name consistently 
+            if (field === 'CREATEDON' || field === 'CREATED_ON') {
+              camelCaseKey = 'createdOn';
             }
             
-            // Add RID if it exists
-            if (ridIndex !== -1 && row[ridIndex] !== undefined) {
-                dataPoint.rid = row[ridIndex];
+            dataPoint[camelCaseKey] = row[foundKey];
+          }
+        });
+        
+        // Also check for any common variations of field names that might be in the data
+        // but don't capture everything to keep the data clean
+        const keyMap = {
+          'LON': 'longitude',
+          'LONGITUDE': 'longitude',
+          'LAT': 'latitude',
+          'LATITUDE': 'latitude',
+          'COMMENT': 'comments',
+          'COMMENTS': 'comments',
+          'POINTTYPE': 'pointType',
+          'POINT_TYPE': 'pointType',
+          'TYPE': 'pointType',
+          'CREATED': 'createdOn',
+          'CREATEDON': 'createdOn',
+          'CREATED_ON': 'createdOn',
+          'CREATION_DATE': 'createdOn',
+          'CREATION_TIME': 'createdOn',
+          'SURVEYOR_NAME': 'collector',
+          'TECHNICIAN': 'collector'
+        };
+        
+        // Apply mappings for common field variations
+        Object.keys(row).forEach(key => {
+          const upperKey = key.toUpperCase();
+          if (keyMap[upperKey] && row[key] !== undefined && row[key] !== null && row[key] !== '') {
+            dataPoint[keyMap[upperKey]] = row[key];
+          }
+        });
+        
+        // Handle CreatedOn field - parse into date and time with specific formatting
+        if (dataPoint.createdOn && !dataPoint.date) {
+          try {
+            const dateObj = new Date(dataPoint.createdOn);
+            if (!isNaN(dateObj.getTime())) {
+              // Format date as MM/DD/YYYY
+              const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+              const day = dateObj.getDate().toString().padStart(2, '0');
+              const year = dateObj.getFullYear();
+              dataPoint.date = `${month}/${day}/${year}`;
+              
+              // Format time as HH:MM:SS
+              const hours = dateObj.getHours().toString().padStart(2, '0');
+              const minutes = dateObj.getMinutes().toString().padStart(2, '0');
+              const seconds = dateObj.getSeconds().toString().padStart(2, '0');
+              dataPoint.time = `${hours}:${minutes}:${seconds}`;
             }
-            
-            // Add Createdon if it exists
-            if (createdOnIndex !== -1 && row[createdOnIndex] !== undefined) {
-                dataPoint.createdon = row[createdOnIndex];
-            }
-            
-            // Add anomaly detection (simple example - can be enhanced)
-            if (!dataPoint.anomaly) {
-                dataPoint.anomaly = 0; // 0 = no anomaly, 1 = possible anomaly, 2 = definite anomaly
-            }
-            
-            // Add group property for custom grouping
-            dataPoint.group = null;
-            
-            // Add to data array if it has the required fields
-            // Modified to include points with station and pointtype, even if they don't have signal values
-            if (dataPoint.station !== undefined && 
-                ((dataPoint.value !== undefined || dataPoint.signal !== undefined) || 
-                 (dataPoint.pointtype !== undefined))) {
-                data.push(dataPoint);
-            }
+          } catch (e) {
+            console.warn("Could not parse createdOn date:", dataPoint.createdOn);
+          }
         }
+        
+        // Store the original raw data as a backup
+        dataPoint._originalData = {...row};
+        
+        result.push(dataPoint);
+        
+        // Increment appropriate counter
+        if (isSpecialPointType) {
+          specialPointsCount++;
+        } else {
+          standardPointsCount++;
+        }
+      } else {
+        console.warn(`Skipping invalid data point: station=${stationVal}, signal=${signalVal}, current=${currentVal}`);
+      }
+    } catch (error) {
+      console.warn("Error processing Excel row:", error, row);
     }
+  }
+
+  console.log(`Parsed ${result.length} total data points (${standardPointsCount} standard, ${specialPointsCount} special)`);
+  
+  // Output field preservation statistics
+  const fieldStats = Object.entries(fieldTracker).map(([field, stats]) => {
+    return { 
+      field, 
+      count: stats.count, 
+      preserved: stats.preserved,
+      preservationRate: stats.count > 0 ? Math.round((stats.preserved / stats.count) * 100) + '%' : 'N/A'
+    };
+  });
+  
+  console.log("Field preservation statistics:", fieldStats);
+  
+  // Check for any fields with low preservation rates
+  const lowPreservationFields = fieldStats.filter(
+    stat => stat.count > 0 && (stat.preserved / stat.count) < 0.9
+  );
+  
+  if (lowPreservationFields.length > 0) {
+    console.warn("WARNING: Some fields have low preservation rates:", lowPreservationFields);
+  }
+  
+  // Debug: Log date and time information for the first few data points
+  if (result.length > 0) {
+    console.log("Sample data point metadata:", result.slice(0, 3).map(pt => ({
+      createdOn: pt.createdOn,
+      date: pt.date,
+      time: pt.time,
+      collector: pt.collector,
+      directionOfSignal: pt.directionOfSignal
+    })));
     
-    // Sort data by station for easier processing
-    data.sort((a, b) => a.station - b.station);
+    // Check what fields we have in the first processed data point
+    console.log("First processed data point fields:", Object.keys(result[0]));
+    console.log("Field count in processed data:", Object.keys(result[0]).length);
     
-    // Log unique RIDs and data points count for debugging
-    const uniqueRIDs = [...new Set(data.map(item => item.rid).filter(rid => rid !== undefined))];
-    console.log(`Found ${uniqueRIDs.length} unique RIDs:`, uniqueRIDs);
-    console.log(`Total data points: ${data.length}`);
-    
-    // Log how many points have geographic coordinates
-    const pointsWithCoords = data.filter(point => 
-        (point.latitude !== undefined && point.longitude !== undefined) || 
-        (point.x !== undefined && point.y !== undefined)
-    ).length;
-    console.log(`Points with geographic coordinates: ${pointsWithCoords} (${((pointsWithCoords/data.length)*100).toFixed(1)}%)`);
-    
-    return data;
+    // Compare with original
+    if (jsonData.length > 0) {
+      const originalFields = Object.keys(jsonData[0]);
+      const processedFields = Object.keys(result[0]);
+      const missingFields = originalFields.filter(field => !processedFields.includes(field));
+      console.log("Fields possibly missing after processing:", missingFields);
+      
+      if (missingFields.length === 0) {
+        console.log("All original fields preserved in processed data!");
+      }
+    }
+  }
+  
+  return result;
 }
 
-/**
- * Organizes data parameters for selection dropdown
- * @param {Array} data - The parsed data
- */
-function organizeDataParameters(data) {
-    // Reset parameters
-    dataParameters = {
-        current: [],
-        potential: [],
-        anomalies: []
+/************************************************************
+ * Populate RID Selector
+ ************************************************************/
+function populateRIDSelector() {
+  const ridSelector = document.getElementById('rid-selector');
+  const ridSelect = document.getElementById('rid-select');
+
+  // Collect unique RIDs
+  const uniqueRIDs = [...new Set(parsedData.map(d => d.rid))];
+  
+  // If only one RID, hide the selector and filter automatically
+  if (uniqueRIDs.length === 1) {
+    ridSelector.style.display = 'none';
+    currentRID = uniqueRIDs[0];
+    filterDataByRID(currentRID);
+  } else {
+    ridSelector.style.display = 'flex';
+    // Clear existing options
+    ridSelect.innerHTML = '';
+    // Create an option for each unique RID
+    uniqueRIDs.forEach(rid => {
+      const opt = document.createElement('option');
+      opt.value = rid;
+      opt.textContent = rid;
+      ridSelect.appendChild(opt);
+    });
+    // Select the first RID by default
+    currentRID = uniqueRIDs[0];
+    ridSelect.value = currentRID;
+    filterDataByRID(currentRID);
+  }
+}
+
+/************************************************************
+ * Handle RID Selection
+ ************************************************************/
+function handleRIDSelection(event) {
+  // Clear selected groups when changing RIDs
+  selectedGroups = [];
+  
+  // Update current RID and filter data
+  currentRID = event.target.value;
+  filterDataByRID(currentRID);
+}
+
+/************************************************************
+ * Filter Data by RID
+ ************************************************************/
+function filterDataByRID(rid) {
+  if (!parsedData || parsedData.length === 0) {
+    console.warn("No data to filter by RID");
+    return;
+  }
+  
+  try {
+    currentRID = rid;
+    
+    // If no rid specified, use the first one available
+    if (!rid) {
+      const availableRIDs = [...new Set(parsedData.map(d => d.rid).filter(r => r))];
+      if (availableRIDs.length > 0) {
+        rid = availableRIDs[0];
+        currentRID = rid;
+      } else {
+        console.warn("No RIDs found in data");
+        filteredData = [];
+        return;
+      }
+    }
+    
+    if (rid && !parsedData.some(d => d && d.rid === rid)) {
+      console.warn(`RID "${rid}" not found in data`);
+      filteredData = [];
+      return;
+    }
+    
+    // Check if this is the first time viewing this RID
+    const isFirstView = !viewedRIDs.has(rid);
+    if (isFirstView) {
+      console.log(`First time viewing RID: ${rid} - will auto-fit to screen`);
+      viewedRIDs.add(rid);
+    }
+    
+    console.log(`Filtering data for RID: ${rid}`);
+    filteredData = parsedData.filter(d => d && d.rid === rid);
+    
+    // Ensure we have valid data points with non-null values for standard points
+    // Or valid special points for POINT GENERIC and SETUP LOCATION
+    const validFilteredData = filteredData.filter(d => 
+      d && d.station != null && !isNaN(d.station) && 
+      (
+        // Standard points need valid current values
+        (d.current != null && !isNaN(d.current) && d.removed === false) ||
+        // Special points only need valid station and correct type
+        (d.isSpecialPoint === true && d.removed === false)
+      )
+    );
+    
+    if (validFilteredData.length === 0) {
+      console.warn(`No valid data points found for RID: ${rid}`);
+      showMessage(`No valid data points found for Route ID: ${rid}`, 'warning');
+      return;
+    }
+    
+    console.log(`Found ${validFilteredData.length} valid data points for RID: ${rid}`);
+    
+    // Sort by station
+    validFilteredData.sort((a, b) => a.station - b.station);
+    
+    // Instead of clearing groups for other RIDs, we keep all groups and only display the current ones
+    // Note: Removed line that filters groups by RID
+    updateGroupList(); // This will now filter by RID for display purposes only
+    
+    // Update the plot with the filtered data - always auto-fit when switching RIDs
+    updatePlot(validFilteredData, true);
+    
+    // Update map if available - wrapped in try/catch to prevent errors
+    try {
+      if (typeof updateMapWithAllData === 'function' && mapInitialized && mapInstance) {
+        updateMapWithAllData(validFilteredData);
+      }
+    } catch (mapError) {
+      console.warn("Error updating map (non-critical):", mapError);
+    }
+  } catch (error) {
+    console.error(`Error filtering data by RID ${rid}:`, error);
+    showMessage(`Error filtering data: ${error.message}`, 'error');
+  }
+}
+
+/************************************************************
+ * Update Plot (Plotly)
+ ************************************************************/
+function updatePlot(dataToDisplay, isFirstView = false) {
+  console.group("updatePlot");
+  
+  if (!dataToDisplay || dataToDisplay.length === 0) {
+    console.warn("No data to display in the plot");
+    console.groupEnd();
+    return;
+  }
+  
+  // Always filter out removed points to ensure they stay removed
+  dataToDisplay = dataToDisplay.filter(pt => !pt.removed);
+  
+  // Sort data by station to ensure proper line connections
+  dataToDisplay.sort((a, b) => a.station - b.station);
+  
+  // Diagnostic information
+  console.log(`Updating plot with ${dataToDisplay.length} data points, isFirstView: ${isFirstView}`);
+  console.log("Data sample:", dataToDisplay.slice(0, 3));
+  
+  // Validate data points
+  const hasInvalidStations = dataToDisplay.some(pt => pt.station == null || isNaN(pt.station));
+  const hasInvalidCurrents = dataToDisplay.some(pt => pt.current == null || isNaN(pt.current) && !pt.isSpecialPoint);
+  
+  if (hasInvalidStations || hasInvalidCurrents) {
+    console.warn("Data contains invalid points:",
+      hasInvalidStations ? "Some stations are invalid" : "",
+      hasInvalidCurrents ? "Some current values are invalid" : "");
+  }
+  
+  // Get the plot div
+  const plotDiv = document.getElementById('plotly-chart');
+  
+  // Save current zoom state if it exists and we're not doing first view
+  let xRange = null;
+  let yRange = null;
+  if (!isFirstView && plotDiv && plotDiv._fullLayout) {
+    if (plotDiv._fullLayout.xaxis && plotDiv._fullLayout.xaxis.range) {
+      xRange = plotDiv._fullLayout.xaxis.range.slice();
+    }
+    if (plotDiv._fullLayout.yaxis && plotDiv._fullLayout.yaxis.range) {
+      yRange = plotDiv._fullLayout.yaxis.range.slice();
+    }
+  }
+
+  // Separate standard data points from special points
+  const standardPoints = dataToDisplay.filter(pt => !pt.isSpecialPoint);
+  const specialPoints = dataToDisplay.filter(pt => pt.isSpecialPoint);
+  
+  // Prepare trace for standard points
+  const xVals = standardPoints.map(pt => pt.station);
+  const yVals = standardPoints.map(pt => pt.current);
+
+  // Make sure data is valid
+  if (xVals.some(x => x == null) || yVals.some(y => y == null)) {
+    console.warn("Some data points have null values:", 
+      xVals.filter(x => x == null).length, "null x values,", 
+      yVals.filter(y => y == null).length, "null y values");
+  }
+
+  // Main trace for current (scattergl)
+  const scatterTrace = {
+    x: xVals,
+    y: yVals,
+    mode: 'lines+markers',
+    type: 'scattergl',
+    name: 'Current (dBmA)',
+    marker: {
+      size: 6,
+      color: '#00A3E0'
+    },
+    line: {
+      color: '#00A3E0',
+      width: 2,
+      shape: 'linear',
+      connectgaps: true,  // Connect gaps but ensure points are properly sorted
+      smoothing: 0.2      // Add slight smoothing to improve appearance
+    },
+    hoverinfo: 'text',
+    text: standardPoints.map(pt => {
+      // For debug: log the first few points to see what fields they have
+      if (standardPoints.indexOf(pt) < 3) {
+        console.log("Point in hover text:", {
+          hasCreatedOn: !!pt.createdOn,
+          hasDate: !!pt.date,
+          hasTime: !!pt.time,
+          createdOn: pt.createdOn,
+          date: pt.date,
+          time: pt.time
+        });
+      }
+      
+      // Safe value formatter with null check
+      const formatValue = (value, decimals = 2) => {
+        return value != null ? value.toFixed(decimals) : 'N/A';
+      };
+      
+      // Build hover text with only the specified fields
+      let hoverText = `Station: ${formatStation(pt.station)}<br>` +
+                      `Current: ${formatValue(pt.current, 2)} dBmA<br>` +
+                      `Signal: ${formatValue(pt.signal, 4)} mA`;
+      
+      // Add only the specific requested metadata fields
+      if (pt.pointType) hoverText += `<br>Point Type: ${pt.pointType}`;
+      if (pt.longitude || pt.lon) hoverText += `<br>Lon: ${pt.longitude || pt.lon}`;
+      if (pt.latitude || pt.lat) hoverText += `<br>Lat: ${pt.latitude || pt.lat}`;
+      if (pt.rid) hoverText += `<br>RID: ${pt.rid}`;
+      if (pt.meas) hoverText += `<br>Meas: ${pt.meas}`;
+      if (pt.directionOfSignal) hoverText += `<br>Direction of Signal: ${pt.directionOfSignal}`;
+      
+      // Handle createdOn field - split into date and time if available
+      if (pt.createdOn) {
+        try {
+          // Try to parse the date string
+          const dateObj = new Date(pt.createdOn);
+          if (!isNaN(dateObj.getTime())) {
+            // Format date as MM/DD/YYYY
+            const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+            const day = dateObj.getDate().toString().padStart(2, '0');
+            const year = dateObj.getFullYear();
+            const dateStr = `${month}/${day}/${year}`;
+            
+            // Format time as HH:MM:SS
+            const hours = dateObj.getHours().toString().padStart(2, '0');
+            const minutes = dateObj.getMinutes().toString().padStart(2, '0');
+            const seconds = dateObj.getSeconds().toString().padStart(2, '0');
+            const timeStr = `${hours}:${minutes}:${seconds}`;
+            
+            hoverText += `<br>Date: ${dateStr}<br>Time: ${timeStr}`;
+          } else {
+            // If parsing fails, just show the original string
+            hoverText += `<br>Created On: ${pt.createdOn}`;
+          }
+        } catch (e) {
+          // If any error occurs in parsing, show the original
+          hoverText += `<br>Created On: ${pt.createdOn}`;
+        }
+      } else {
+        // If we have separate date and time fields, show those
+        if (pt.date) hoverText += `<br>Date: ${pt.date}`;
+        if (pt.time) hoverText += `<br>Time: ${pt.time}`;
+      }
+      
+      // Add collector information if available
+      if (pt.collector) hoverText += `<br>Collector: ${pt.collector}`;
+      if (pt.surveyor && !pt.collector) hoverText += `<br>Collector: ${pt.surveyor}`;
+      
+      return hoverText;
+    })
+  };
+
+  // Create data array that will hold all our traces
+  const data = [scatterTrace];
+  
+  // Get the selected groups (filtered by current RID)
+  const visibleGroups = customGroups.filter(g => 
+    g.rid === currentRID && 
+    g.visible && 
+    g.points.length >= 2 &&
+    (selectedGroups.length === 0 || selectedGroups.includes(g.id))
+  );
+  
+  if (visibleGroups.length === 0) {
+    // If no groups are selected or available, calculate percentage changes for all data
+    const percentageChanges = calculatePercentageChange(standardPoints);
+    
+    if (percentageChanges.length > 0) {
+      // For non-grouped data, we'll use the traditional bar chart approach
+      const barTrace = {
+        x: percentageChanges.map(pc => pc.station),
+        y: percentageChanges.map(pc => pc.percentChange),
+        type: 'bar',
+        name: '% Change/100ft',
+        marker: {
+          color: 'rgba(255, 165, 0, 0.7)'
+        },
+        yaxis: 'y2',
+        hoverinfo: 'text',
+        text: percentageChanges.map(pc => {
+          // Safe value formatter with null check
+          const formatValue = (value, decimals = 2) => {
+            return value != null ? value.toFixed(decimals) : 'N/A';
+          };
+          
+          return `Station: ${formatStation(pc.station)}<br>` +
+                 `Change: ${pc.percentChange != null ? formatValue(pc.percentChange, 2) : 'N/A'}%/100ft<br>` +
+                 `Distance: ${formatValue(pc.distance)} ft`;
+        })
+      };
+      
+      data.push(barTrace);
+    }
+  } else {
+    // Sort groups by their first station point for transition calculations
+    visibleGroups.sort((a, b) => {
+      const aFirstStation = Math.min(...a.points.map(p => p.station));
+      const bFirstStation = Math.min(...b.points.map(p => p.station));
+      return aFirstStation - bFirstStation;
+    });
+    
+    // For each group, create a single solid bar
+    visibleGroups.forEach(group => {
+      // Calculate percentage change for this group
+      const groupPercentageChange = calculatePercentageChange(group.points, group);
+      
+      if (groupPercentageChange.length > 0) {
+        // Get the first and last points in the group (already sorted by station in calculatePercentageChange)
+        const sortedPoints = [...group.points].sort((a, b) => a.station - b.station);
+        const startStation = sortedPoints[0].station;
+        const endStation = sortedPoints[sortedPoints.length - 1].station;
+        
+        // Extract the single percentage change value
+        const percentValue = groupPercentageChange[0].percentChange;
+        
+        // Create a solid bar for this group using a fill area approach
+        const solidBarTrace = {
+          x: [startStation, startStation, endStation, endStation],
+          y: [0, percentValue, percentValue, 0],
+          fill: 'toself',
+          fillcolor: group.color.replace('rgb', 'rgba').replace(')', ', 0.7)'),
+          line: {
+            color: group.color,
+            width: 1
+          },
+          name: `${percentValue.toFixed(2)}%/100ft`,
+          yaxis: 'y2',
+          hoverinfo: 'text',
+          text: `Group: ${group.name}<br>` +
+                `Station Range: ${formatStation(startStation)} - ${formatStation(endStation)}<br>` +
+                `Change: ${percentValue.toFixed(2)}%/100ft<br>` +
+                `Points in Group: ${sortedPoints.length}`,
+          type: 'scatter'
+        };
+        
+        data.push(solidBarTrace);
+      }
+    });
+    
+    // Calculate and add transition bars between groups
+    for (let i = 0; i < visibleGroups.length - 1; i++) {
+      const currentGroup = visibleGroups[i];
+      const nextGroup = visibleGroups[i + 1];
+      
+      // Get the last point of current group and first point of next group
+      const currentGroupPoints = [...currentGroup.points].sort((a, b) => a.station - b.station);
+      const nextGroupPoints = [...nextGroup.points].sort((a, b) => a.station - b.station);
+      
+      const lastPointCurrent = currentGroupPoints[currentGroupPoints.length - 1];
+      const firstPointNext = nextGroupPoints[0];
+      
+      // Skip if points are missing critical data
+      if (!lastPointCurrent || !firstPointNext || 
+          lastPointCurrent.current == null || firstPointNext.current == null) {
+        continue;
+      }
+      
+      // Calculate distance between groups
+      const distance = firstPointNext.station - lastPointCurrent.station;
+      
+      // Skip if the groups are too close or too far
+      if (distance < 0.1 || distance > 1000) {
+        continue;
+      }
+      
+      // Calculate percentage change between the last point of current group and first point of next group
+      const referenceValue = lastPointCurrent.current;
+      const currentValue = firstPointNext.current;
+      const percentChange = Math.abs((referenceValue - currentValue) / referenceValue) * 100 * (100 / distance);
+      
+      // Cap extreme values for display
+      const cappedPercentChange = percentChange > 10 ? 10 : percentChange;
+      
+      // Create a transition bar
+      const transitionTrace = {
+        x: [lastPointCurrent.station, lastPointCurrent.station, firstPointNext.station, firstPointNext.station],
+        y: [0, cappedPercentChange, cappedPercentChange, 0],
+        fill: 'toself',
+        fillcolor: 'rgba(150, 150, 150, 0.5)', // Gray color for transitions
+        line: {
+          color: 'rgba(100, 100, 100, 0.8)',
+          width: 1,
+          dash: 'dot'
+        },
+        name: `${cappedPercentChange.toFixed(2)}%/100ft`,
+        yaxis: 'y2',
+        hoverinfo: 'text',
+        text: `Transition: ${currentGroup.name} → ${nextGroup.name}<br>` +
+              `Station Range: ${formatStation(lastPointCurrent.station)} - ${formatStation(firstPointNext.station)}<br>` +
+              `Change: ${cappedPercentChange.toFixed(2)}%/100ft`,
+        type: 'scatter'
+      };
+      
+      data.push(transitionTrace);
+    }
+  }
+
+  // Add trace for POINT GENERIC points
+  const pointGenericPoints = specialPoints.filter(pt => 
+    pt.pointType && pt.pointType.toUpperCase() === 'POINT GENERIC');
+    
+  const pointGenericTrace = {
+    x: pointGenericPoints.map(pt => pt.station),
+    y: pointGenericPoints.map(() => {
+      // Get a y-value at the bottom of the chart but visible
+      const minY = Math.min(...standardPoints.map(p => p.current).filter(y => y !== null && !isNaN(y)));
+      return minY * 0.9; // Place slightly below the min value
+    }),
+    mode: 'markers',
+    type: 'scatter',
+    name: 'Point Generic',
+    marker: {
+      size: 12,
+      symbol: 'square',
+      color: '#ff6347', // Tomato red
+      line: {
+        width: 2,
+        color: '#000'
+      }
+    },
+    hoverinfo: 'text',
+    text: pointGenericPoints.map(pt => 
+      `Station: ${formatStation(pt.station)}<br>` +
+      `Type: Point Generic<br>` +
+      `Location Marker`
+    )
+  };
+
+  // Add trace for SETUP LOCATION points
+  const setupLocationPoints = specialPoints.filter(pt => 
+    pt.pointType && pt.pointType.toUpperCase() === 'SETUP LOCATION');
+    
+  const setupLocationTrace = {
+    x: setupLocationPoints.map(pt => pt.station),
+    y: setupLocationPoints.map(() => {
+      // Get a y-value at the bottom of the chart but visible
+      const minY = Math.min(...standardPoints.map(p => p.current).filter(y => y !== null && !isNaN(y)));
+      return minY * 0.85; // Place slightly lower than the POINT GENERIC markers
+    }),
+    mode: 'markers',
+    type: 'scatter',
+    name: 'Setup Location',
+    marker: {
+      size: 12,
+      symbol: 'triangle-up',
+      color: '#32cd32', // Lime green
+      line: {
+        width: 2,
+        color: '#000'
+      }
+    },
+    hoverinfo: 'text',
+    text: setupLocationPoints.map(pt => 
+      `Station: ${formatStation(pt.station)}<br>` +
+      `Type: Setup Location<br>` +
+      `Location Marker`
+    )
+  };
+
+  // Create evenly-spaced tick values and formatted tick labels
+  const minStation = Math.min(...dataToDisplay.map(pt => pt.station));
+  const maxStation = Math.max(...dataToDisplay.map(pt => pt.station));
+  const stepSize = (maxStation - minStation) / 10; // 10 ticks
+  
+  // Generate the tick values
+  const tickVals = [];
+  const tickText = [];
+  
+  if (minStation !== Infinity && maxStation !== -Infinity && !isNaN(stepSize) && isFinite(stepSize) && stepSize > 0) {
+    console.log(`X-axis range: ${minStation} to ${maxStation}, step size: ${stepSize}`);
+    for (let i = 0; i <= 10; i++) {
+      const tickValue = minStation + (stepSize * i);
+      tickVals.push(tickValue);
+      tickText.push(formatStation(tickValue));
+    }
+  } else {
+    console.warn("Invalid data range for X-axis ticks:", 
+      {minStation, maxStation, stepSize});
+  }
+
+  const layout = {
+    hovermode: 'closest',
+    margin: { l: 60, r: 60, t: 30, b: 60 },
+    showlegend: true,
+    legend: {
+      bgcolor: 'rgba(0,0,0,0.1)',
+      bordercolor: 'rgba(255,255,255,0.2)',
+      borderwidth: 1,
+      font: { color: '#fff' },
+      x: 1,
+      xanchor: 'right'
+    },
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0.2)',
+    xaxis: {
+      title: {
+        text: 'Station',
+        font: {
+          size: 16,
+          color: '#fff'
+        }
+      },
+      // Custom station format function
+      tickformat: '',
+      tickmode: tickVals.length > 0 ? 'array' : 'auto',
+      tickvals: tickVals,
+      ticktext: tickText,
+      gridcolor: 'rgba(255,255,255,0.1)',
+      zerolinecolor: 'rgba(255,255,255,0.3)',
+      tickfont: { color: '#fff' }
+    },
+    yaxis: {
+      title: {
+        text: 'Current (dBmA)',
+        font: {
+          size: 16,
+          color: '#fff'
+        }
+      },
+      gridcolor: 'rgba(255,255,255,0.1)',
+      zerolinecolor: 'rgba(255,255,255,0.3)',
+      tickfont: { color: '#fff' }
+    },
+    yaxis2: {
+      title: {
+        text: '% Current Change/100 ft  ',  // Added extra spaces for padding
+        font: {
+          size: 16,
+          color: 'rgb(255, 165, 0)'
+        }
+      },
+      overlaying: 'y',
+      side: 'right',
+      showgrid: false,
+      tickfont: { color: 'rgb(255, 165, 0)' },
+      tickformat: '.1f',  // Changed from .1% to .1f to show plain numbers
+      dtick: 0.5,  // Changed from 0.005 to 0.5 to show ticks every 0.5% instead of 0.005%
+      rangemode: 'nonnegative'
+    }
+  };
+
+  // Add special point traces if they have points
+  if (pointGenericPoints.length > 0) {
+    data.push(pointGenericTrace);
+  }
+  
+  if (setupLocationPoints.length > 0) {
+    data.push(setupLocationTrace);
+  }
+
+  // Add custom group traces if they exist
+  customGroups.forEach(group => {
+    if (group.visible && group.rid === currentRID) {
+      const groupPoints = group.points;
+      data.push({
+        x: groupPoints.map(pt => pt.station),
+        y: groupPoints.map(pt => pt.current),
+        mode: 'markers',
+        type: 'scattergl',
+        name: group.name,
+        marker: {
+          size: 8,
+          color: group.color
+        },
+        hoverinfo: 'text',
+        text: groupPoints.map(pt => {
+          // Safe value formatter with null check
+          const formatValue = (value, decimals = 2) => {
+            return value != null ? value.toFixed(decimals) : 'N/A';
+          };
+          
+          return `Group: ${group.name}<br>` +
+                 `Station: ${formatStation(pt.station)}<br>` +
+                 `Current: ${formatValue(pt.current)} dBmA`;
+        })
+      });
+    }
+  });
+
+  // Save the active modebar button before updating the plot
+  let activeButton = null;
+  if (document.querySelector('.modebar-btn.active')) {
+    activeButton = document.querySelector('.modebar-btn.active').getAttribute('data-title');
+    console.log('Saving active tool:', activeButton);
+  }
+
+  // Update the chart
+  Plotly.react('plotly-chart', data, layout, {
+    responsive: true,
+    scrollZoom: true,
+    displayModeBar: true,
+    modeBarButtonsToAdd: [
+      'select2d',
+      'lasso2d',
+      'zoomIn2d',
+      'zoomOut2d',
+      'autoScale2d',
+      'resetScale2d'
+    ],
+    modeBarButtonsToRemove: [
+      'toImage', 
+      'sendDataToCloud'
+    ]
+  });
+
+  // Restore the previous zoom if it exists
+  if (xRange && yRange) {
+    Plotly.relayout('plotly-chart', {
+      'xaxis.range': xRange,
+      'yaxis.range': yRange
+    });
+  }
+
+  // Reactivate the previously active tool if one was active
+  if (activeButton) {
+    setTimeout(() => {
+      const buttons = document.querySelectorAll('.modebar-btn');
+      for (const button of buttons) {
+        if (button.getAttribute('data-title') === activeButton) {
+          button.click();
+          console.log('Restored active tool:', activeButton);
+          break;
+        }
+      }
+    }, 100); // Short delay to ensure the modebar is fully initialized
+  }
+  
+  console.groupEnd();
+}
+
+/************************************************************
+ * Handle Plot Selection
+ ************************************************************/
+function handlePlotSelection(eventData) {
+  if (!eventData || !eventData.points) return;
+  selectedDataPoints = [];
+  
+  // Keep track of points we skip because they're already in a group
+  let alreadyGroupedCount = 0;
+
+  for (let point of eventData.points) {
+    if (!point || point.x == null) continue; // Skip invalid points
+    
+    let stationValue = point.x;
+    // Find matching data in filteredData
+    let matchIndex = filteredData.findIndex(d => d.station === stationValue && d.removed === false);
+    
+    if (matchIndex !== -1) {
+      // Check if this point is already in a group for the current RID
+      const pointAlreadyInGroup = customGroups.some(group => 
+        group.rid === currentRID && 
+        group.points.some(groupPoint => 
+          groupPoint.station === filteredData[matchIndex].station
+        )
+      );
+      
+      if (pointAlreadyInGroup) {
+        // Skip this point as it's already in a group
+        alreadyGroupedCount++;
+        continue;
+      }
+      
+      // Add the point to our selection if it's not already in a group
+      selectedDataPoints.push(matchIndex);
+    }
+  }
+
+  // Show a message if we skipped some points that were already in groups
+  if (alreadyGroupedCount > 0) {
+    showMessage(`Skipped ${alreadyGroupedCount} point(s) that are already in groups`, 'info');
+  }
+
+  // Show selection info
+  displaySelectionInfo();
+  
+  // Update the group name input with the next group number
+  if (selectedDataPoints.length > 0) {
+    const groupNameInput = document.getElementById('group-name-input');
+    // Count how many groups already exist for the current RID
+    const ridGroupCount = customGroups.filter(g => g.rid === currentRID).length;
+    // Use that count + 1 for the new group number 
+    groupNameInput.value = `Group ${ridGroupCount + 1}`;
+    // Focus the input so the user can easily edit if desired
+    groupNameInput.focus();
+    // Select the text so typing automatically replaces it
+    groupNameInput.select();
+  }
+}
+
+/************************************************************
+ * Handle Plot Click (for remove mode)
+ ************************************************************/
+function handlePlotClick(eventData) {
+  if (!isRemoveMode || !eventData || !eventData.points) return;
+  
+  const point = eventData.points[0];
+  if (!point) return;
+  let stationValue = point.x;
+  
+  // Check if this point is already in a group
+  const pointData = filteredData.find(d => d.station === stationValue && d.removed === false);
+  if (!pointData) return;
+  
+  const pointAlreadyInGroup = customGroups.some(group => 
+    group.rid === currentRID && 
+    group.points.some(groupPoint => groupPoint.station === stationValue)
+  );
+  
+  if (pointAlreadyInGroup) {
+    showMessage(`Cannot remove point at station ${formatStation(stationValue)} as it belongs to a group`, 'warning');
+    return;
+  }
+  
+  let matchIndex = filteredData.findIndex(d => d.station === stationValue && d.removed === false);
+  
+  if (matchIndex !== -1) {
+    filteredData[matchIndex].removed = true;
+    removedPoints.push(filteredData[matchIndex]);
+    showMessage(`Point at station ${formatStation(stationValue)} removed.`, 'info');
+    
+    // Get visible data points and ensure they're sorted
+    const visibleData = filteredData.filter(d => !d.removed);
+    visibleData.sort((a, b) => a.station - b.station);
+    
+    // Re-render chart with sorted data
+    updatePlot(visibleData);
+  }
+}
+
+/************************************************************
+ * Display Selection Info
+ ************************************************************/
+function displaySelectionInfo() {
+  const selectionInfoDiv = document.getElementById('selection-info');
+  const selectionCount = document.getElementById('selection-count');
+  const selectionStats = document.getElementById('selection-stats');
+  
+  // If no selection, hide the info div
+  if (selectedDataPoints.length === 0) {
+    selectionInfoDiv.style.display = 'none';
+    return;
+  }
+  
+  // Show the info div
+  selectionInfoDiv.style.display = 'block';
+  
+  // Update selection count
+  selectionCount.textContent = selectedDataPoints.length;
+  
+  // Get the selected points from the filtered data using indexes
+  const selectedPoints = selectedDataPoints.map(index => filteredData[index]);
+  
+  // Safety check - make sure we have valid points
+  if (!selectedPoints.length || selectedPoints.some(p => p == null)) {
+    selectionStats.innerHTML = '<div class="warning-message"><i class="fa fa-exclamation-triangle"></i> Error processing selection data</div>';
+    return;
+  }
+  
+  // Calculate basic stats like min, max, average, etc.
+  try {
+    const stats = {
+      minStation: Math.min(...selectedPoints.map(p => p.station || 0)),
+      maxStation: Math.max(...selectedPoints.map(p => p.station || 0)),
+      spanStation: 0,
+      minSignal: Math.min(...selectedPoints.map(p => p.signal || 0)),
+      maxSignal: Math.max(...selectedPoints.map(p => p.signal || 0)),
+      avgSignal: 0,
+      minCurrent: Math.min(...selectedPoints.filter(p => p.current != null).map(p => p.current)),
+      maxCurrent: Math.max(...selectedPoints.filter(p => p.current != null).map(p => p.current)),
+      avgCurrent: 0
     };
     
-    // Check what parameters are available in the data
-    const samplePoint = data[0] || {};
-    const availableParams = Object.keys(samplePoint);
+    // Calculate span and averages safely
+    stats.spanStation = stats.maxStation - stats.minStation;
+    stats.avgSignal = selectedPoints.reduce((sum, p) => sum + (p.signal || 0), 0) / selectedPoints.length;
     
-    // Check if current values are available
-    const hasCurrentValues = data.some(point => point.current !== undefined);
+    // Calculate average current only for points with valid current values
+    const pointsWithCurrent = selectedPoints.filter(p => p.current != null);
+    stats.avgCurrent = pointsWithCurrent.length ? 
+      pointsWithCurrent.reduce((sum, p) => sum + p.current, 0) / pointsWithCurrent.length : 0;
     
-    // Update parameter select dropdown if it exists
-    if (parameterSelect) {
-        // Clear existing options
-        parameterSelect.innerHTML = '';
-        
-        // Always add station
-        const stationOption = document.createElement('option');
-        stationOption.value = 'station';
-        stationOption.textContent = 'Station';
-        parameterSelect.appendChild(stationOption);
-        
-        // Add signal option
-        const signalOption = document.createElement('option');
-        signalOption.value = 'signal';
-        signalOption.textContent = 'Signal (mA)';
-        // Only select signal if current is not available
-        signalOption.selected = !hasCurrentValues;
-        parameterSelect.appendChild(signalOption);
-        
-        // Add current option if available
-        if (hasCurrentValues) {
-            const currentOption = document.createElement('option');
-            currentOption.value = 'current';
-            currentOption.textContent = 'Current (dBmA)';
-            currentOption.selected = true; // Make current the default if available
-            parameterSelect.appendChild(currentOption);
-            
-            // Update active parameter to current
-            activeParameter = 'current';
-        }
-        
-        // Add other available parameters
-        availableParams.forEach(param => {
-            if (param !== 'station' && param !== 'signal' && param !== 'current' && param !== 'value') {
-                const option = document.createElement('option');
-                option.value = param;
-                option.textContent = param.charAt(0).toUpperCase() + param.slice(1);
-                parameterSelect.appendChild(option);
-                
-                // Collect parameter data
-                if (param === 'potential' || param === 'anomaly') {
-                    dataParameters[param] = data.map(point => ({
-                        station: point.station,
-                        value: point[param]
-                    }));
-                }
-            }
-        });
-    }
+    // Format the stats
+    const formatStat = (value, decimals = 2) => {
+      if (value == null || isNaN(value)) {
+        return 'N/A';
+      }
+      return typeof value === 'number' ? value.toFixed(decimals) : value;
+    };
+    
+    // Build the stats HTML
+    selectionStats.innerHTML = `
+      <div class="stats-grid">
+        <div class="stat-item">
+          <strong>Station Range:</strong> 
+          ${formatStation(stats.minStation)} to ${formatStation(stats.maxStation)} 
+          (${formatStat(stats.spanStation)} units)
+        </div>
+        <div class="stat-item">
+          <strong>Signal Range:</strong> 
+          ${formatStat(stats.minSignal, 4)} to ${formatStat(stats.maxSignal, 4)} mA
+          (Avg: ${formatStat(stats.avgSignal, 4)} mA)
+        </div>
+        <div class="stat-item">
+          <strong>Current Range:</strong> 
+          ${formatStat(stats.minCurrent)} to ${formatStat(stats.maxCurrent)} dBmA
+          (Avg: ${formatStat(stats.avgCurrent)} dBmA)
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    console.error("Error calculating selection stats:", error);
+    selectionStats.innerHTML = '<div class="warning-message"><i class="fa fa-exclamation-triangle"></i> Error processing selection data</div>';
+  }
 }
 
-/**
- * Process and display the data
- * @param {Array} dataToProcess - The data to process and display
- */
-function processAndDisplayData(dataToProcess) {
-    try {
-        // Clear any previous chart
-        if (chart) {
-            chart.destroy();
-            chart = null; // Set chart to null after destroying it
-        }
-        
-        // Update chart with the data
-        updateChart(dataToProcess);
-        
-        // Ensure chart event listeners are set up
-        initializeChartPlugins();
-        
-        // Update the output display
-        updateOutputDisplay(dataToProcess);
-        
-        // Update map with all data points
-        updateMapWithAllData(dataToProcess);
-        
-        // Enable controls
-        if (groupNameInput) groupNameInput.disabled = false;
-        if (applyGroupBtn) applyGroupBtn.disabled = false;
-        if (downloadButton) downloadButton.disabled = false;
-        if (exportFormatSelect) exportFormatSelect.disabled = false;
-        
-        showMessage('Data processed successfully.', 'success');
-    } catch (error) {
-        console.error('Error processing data:', error);
-        showMessage(`Error processing data: ${error.message}`, 'error');
+/************************************************************
+ * Grouping (Create Custom Group)
+ ************************************************************/
+function handleApplyCustomGroup() {
+  // Check if we have selected data points
+  if (selectedDataPoints.length === 0) {
+    showMessage('Please select data points before creating a group', 'warning');
+    return;
+  }
+
+  // Get the group name from the input
+  const groupNameInput = document.getElementById('group-name-input');
+  let groupName = groupNameInput.value.trim();
+  
+  // If no name provided, use a default name with numbering that starts at 1 for each RID
+  if (!groupName) {
+    // Count how many groups already exist for the current RID
+    const ridGroupCount = customGroups.filter(g => g.rid === currentRID).length;
+    // Use that count + 1 for the new group number
+    groupName = `Group ${ridGroupCount + 1}`;
+  }
+
+  // Create a unique ID for the group (timestamp)
+  const groupId = Date.now();
+  
+  // Select a color from the palette - use the count of groups for this specific RID
+  const ridGroups = customGroups.filter(g => g.rid === currentRID);
+  const colorIndex = ridGroups.length % colorPalette.length;
+  const color = colorPalette[colorIndex];
+  
+  // Create points array with deep copies of the selected points
+  const points = selectedDataPoints.map(index => {
+    // Make sure the index is valid
+    if (index >= 0 && index < filteredData.length) {
+      return { ...filteredData[index] };
     }
+    return null; // For invalid indexes
+  }).filter(Boolean); // Remove any null entries
+  
+  // Safety check - make sure we have valid points
+  if (points.length === 0) {
+    showMessage('Error: Failed to create group with selected points', 'error');
+    return;
+  }
+  
+  // Sort points by station to ensure consistent display
+  points.sort((a, b) => a.station - b.station);
+
+  // Create the group object
+  const newGroup = {
+    id: groupId,
+    name: groupName,
+    color: color,
+    points: points,
+    visible: true,
+    rid: currentRID
+  };
+
+  // Add to custom groups array
+  customGroups.push(newGroup);
+
+  // Automatically select the new group for percentage change calculation
+  selectedGroups.push(groupId);
+
+  // Update the visualization
+  updatePlot(filteredData);
+  
+  // Update the group list in the UI
+  updateGroupList();
+  
+  // Update map with new group colors
+  if (typeof updateMapWithAllData === 'function' && mapInitialized) {
+    updateMapWithAllData(filteredData);
+  }
+  
+  // Clear the input field
+  groupNameInput.value = '';
+  
+  // Display success message
+  showMessage(`Created group "${groupName}" with ${points.length} points`, 'success');
+  
+  // Also clear the selection
+  selectedDataPoints = [];
+  
+  // Update selection info
+  displaySelectionInfo();
 }
 
-/**
- * Updates chart datasets with custom groups
- * @param {Array} datasets - The current chart datasets
- * @returns {Array} - Updated datasets with custom groups
- */
-function updateChartWithCustomGroups(datasets) {
-    // If no custom groups, return original datasets
-    if (!customGroups || customGroups.length === 0) {
-        return datasets;
-    }
-    
-    // Filter groups by current RID
-    const ridGroups = currentRID 
-        ? customGroups.filter(group => group.rid === currentRID)
-        : [];
-    
-    if (ridGroups.length === 0) {
-        return datasets;
-    }
-    
-    // Determine which parameter to use for the y-axis (prefer current if available)
-    const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-    const displayParameter = dataToUse.some(point => point.current !== undefined) ? 'current' : activeParameter;
-    console.log('Using display parameter for custom groups:', displayParameter);
-    
-    // Add each custom group as a dataset
-    ridGroups.forEach((group) => {
-        // Skip if group is not visible
-        if (!group.visible) {
-            return;
-        }
-        
-        // Use the group's color directly - ensure it's in rgba format for consistency
-        let color = group.color;
-        
-        // If color is in hex format, convert to rgba
-        if (color.startsWith('#')) {
-            const r = parseInt(color.slice(1, 3), 16);
-            const g = parseInt(color.slice(3, 5), 16);
-            const b = parseInt(color.slice(5, 7), 16);
-            color = `rgba(${r}, ${g}, ${b}, 0.8)`;
-        }
-        
-        // Filter out removed points from this group
-        const visibleGroupPoints = group.points.filter(point => 
-            !removedPoints.some(removedPoint => removedPoint.station === point.station)
-        );
-        
-        if (visibleGroupPoints.length === 0) {
-            return; // Skip empty groups
-        }
-        
-        // Calculate min/max values for station and y-axis parameter
-        const yValues = visibleGroupPoints.map(point => 
-            point[displayParameter] !== undefined ? point[displayParameter] : point[activeParameter]
-        );
-        const stationValues = visibleGroupPoints.map(point => point.station);
-        
-        const minY = Math.min(...yValues);
-        const maxY = Math.max(...yValues);
-        const minStation = Math.min(...stationValues);
-        const maxStation = Math.max(...stationValues);
-        
-        // Create a dataset for this group's points
-        const groupDataset = {
-            label: group.name,
-            data: visibleGroupPoints.map(point => ({
-                x: point.station,
-                y: point[displayParameter] !== undefined ? point[displayParameter] : point[activeParameter]
-            })),
-            backgroundColor: color,
-            borderColor: color,
-            pointRadius: 5,
-            pointHoverRadius: 7,
-            pointStyle: 'circle',
-            showLine: false,
-            customGroup: true, // Mark as custom group for reference
-            groupId: group.id // Store group ID for reference
-        };
-        
-        // Add datasets to array
-        datasets.push(groupDataset); // Add the actual data points
-    });
-    
-    return datasets;
-}
+/************************************************************
+ * Update Group List
+ ************************************************************/
+function updateGroupList() {
+  const groupListDiv = document.getElementById('group-list');
+  groupListDiv.innerHTML = '';
 
-/**
- * Calculates the percentage change per 100 feet between consecutive data points
- * @param {Array} data - The sorted data array
- * @param {Object} group - Optional group object to calculate changes for a specific group
- * @returns {Array} - Array of percentage change values
- */
-function calculatePercentageChange(data, group = null) {
-    try {
-        if (!data || data.length < 2) {
-            console.log('Not enough data points for percentage change calculation');
-            return [];
-        }
-        
-        // If a specific group is provided, use only those points
-        const dataToProcess = group ? [...group.points] : [...data];
-        
-        // Sort data by station
-        const sortedData = dataToProcess.sort((a, b) => a.station - b.station);
-        console.log(`Calculating percentage change for ${sortedData.length} sorted data points${group ? ` in group "${group.name}"` : ''}`);
-        
-        // Calculate percentage change per 100 feet
-        const percentageChanges = [];
-        
-        // If we're using filtered data (specific RID), we're already working with a single RID
-        // Otherwise, we need to calculate percentage changes for each RID separately
-        if (filteredData.length > 0 || group) {
-            // We're already working with a specific RID or group
-            calculateChangesForDataSet(sortedData, percentageChanges, group);
-        } else {
-            // Check if data has RID property
-            const hasRID = sortedData.some(point => point.rid !== undefined);
-            
-            if (hasRID) {
-                // Group data by RID
-                const ridGroups = {};
-                sortedData.forEach(point => {
-                    const rid = point.rid || 'unknown';
-                    if (!ridGroups[rid]) {
-                        ridGroups[rid] = [];
-                    }
-                    ridGroups[rid].push(point);
-                });
-                
-                // Calculate percentage changes for each RID group
-                Object.keys(ridGroups).forEach(rid => {
-                    if (ridGroups[rid].length >= 2) {
-                        console.log(`Calculating percentage change for RID: ${rid} with ${ridGroups[rid].length} points`);
-                        calculateChangesForDataSet(ridGroups[rid], percentageChanges);
-                    }
-                });
-            } else {
-                // No RID property, treat all data as one set
-                calculateChangesForDataSet(sortedData, percentageChanges);
-            }
-        }
-        
-        console.log(`Generated ${percentageChanges.length} percentage change points${group ? ` for group "${group.name}"` : ''}`);
-        return percentageChanges;
-    } catch (error) {
-        console.error('Error calculating percentage change:', error);
-        showMessage('Error calculating percentage change: ' + error.message, 'error');
-        return [];
-    }
-}
+  if (customGroups.length === 0 || 
+      !customGroups.some(g => g.rid === currentRID)) {
+    // No groups for the current RID
+    groupListDiv.innerHTML = `
+      <div class="hint-text">
+        <i class="fa fa-info-circle"></i> No groups created yet for the current route (${currentRID}). 
+        Select points on the chart and use "Create Group" to organize your data.
+      </div>
+    `;
+    return;
+  }
 
-/**
- * Helper function to calculate percentage changes for a dataset
- * @param {Array} dataSet - Array of data points
- * @param {Array} results - Array to store results
- * @param {Object} group - Optional group object for group-specific calculations
- */
-function calculateChangesForDataSet(dataSet, results, group = null) {
-    // Ensure data is sorted by station
-    const sortedSet = [...dataSet].sort((a, b) => a.station - b.station);
-    
-    // Skip if no data points
-    if (sortedSet.length === 0) return;
-    
-    // Group data by Route ID if available
-    const ridGroups = {};
-    
-    // Check if data has RID property
-    const hasRID = sortedSet.some(point => point.rid !== undefined);
-    
-    if (hasRID) {
-        // Group data by RID
-        sortedSet.forEach(point => {
-            const rid = point.rid || 'unknown';
-            if (!ridGroups[rid]) {
-                ridGroups[rid] = [];
-            }
-            ridGroups[rid].push(point);
-        });
-        
-        // Process each RID group separately
-        Object.keys(ridGroups).forEach(rid => {
-            if (ridGroups[rid].length >= 2) {
-                processRIDGroup(ridGroups[rid], results, group);
-            }
-        });
-    } else {
-        // No RID property, treat all data as one set
-        processRIDGroup(sortedSet, results, group);
-    }
-}
+  // Filter groups by current RID for display purposes only
+  const currentGroups = customGroups.filter(g => g.rid === currentRID);
+  
+  // Show count of groups for current RID
+  const groupCountMessage = document.createElement('div');
+  groupCountMessage.className = 'hint-text mb-2';
+  groupCountMessage.innerHTML = `
+    <i class="fa fa-layer-group"></i> Showing ${currentGroups.length} group(s) for route: <strong>${currentRID}</strong>
+  `;
+  groupListDiv.appendChild(groupCountMessage);
 
-/**
- * Process a group of points with the same Route ID
- * @param {Array} points - Array of data points with the same RID
- * @param {Array} results - Array to store results
- * @param {Object} group - Optional group object for group-specific calculations
- */
-function processRIDGroup(points, results, group = null) {
-    // Sort points by station
-    const sortedPoints = [...points].sort((a, b) => a.station - b.station);
-    
-    // Skip if we don't have enough points
-    if (sortedPoints.length < 2) return;
-    
-    // Use the first point as the reference point
-    const referencePoint = sortedPoints[0];
-    
-    // Get the reference current value (use current if available, otherwise use the active parameter)
-    const referenceValue = referencePoint.current !== undefined ? 
-        referencePoint.current : 
-        referencePoint[activeParameter];
-    
-    // Get the second point to calculate the initial percentage change
-    const secondPoint = sortedPoints[1];
-    
-    // Calculate distance between first and second points
-    const initialDistance = Math.abs(secondPoint.station - referencePoint.station);
-    
-    // Skip if distance is too small
-    if (initialDistance < 0.1) {
-        console.log(`Skipping group - distance between first two points too small: ${initialDistance}`);
-        return;
-    }
-    
-    // Get the current value for the second point
-    const secondPointValue = secondPoint.current !== undefined ? 
-        secondPoint.current : 
-        secondPoint[activeParameter];
-    
-    // Skip if second point value is too close to zero
-    if (Math.abs(secondPointValue) < 0.0001) {
-        console.log(`Skipping group - second point value too close to zero: ${secondPointValue}`);
-        return;
-    }
-    
-    // Calculate percentage change using the updated formula with currentValue as divisor
-    const groupPercentChange = Math.abs((referenceValue - secondPointValue) / secondPointValue / initialDistance * 100);
-    
-    // Cap extreme values for display purposes
-    const cappedGroupPercentChange = groupPercentChange > 100 ? 100 : groupPercentChange;
-    
-    // Skip if the percentage change is invalid
-    if (!isNaN(groupPercentChange) && isFinite(groupPercentChange)) {
-        console.log(`Group "${group ? group.name : 'default'}": Calculated percentage change ${groupPercentChange.toFixed(3)}% (capped: ${cappedGroupPercentChange.toFixed(3)}%)`);
-        
-        // Apply this same percentage change to all points in the group (except the first point)
-        for (let i = 1; i < sortedPoints.length; i++) {
-            const currentPoint = sortedPoints[i];
-            
-            // Skip if stations are the same as reference
-            if (currentPoint.station === referencePoint.station) continue;
-            
-            // Use the same percentage change for all points in the group
-            results.push({
-                station: currentPoint.station,
-                percentChange: cappedGroupPercentChange,
-                actualPercentChange: groupPercentChange,
-                rid: currentPoint.rid,
-                groupId: group ? group.id : null,
-                groupName: group ? group.name : null,
-                groupColor: group ? group.color : null,
-                referenceStation: referencePoint.station,
-                distance: Math.abs(currentPoint.station - referencePoint.station),
-                isGroupValue: true // Flag to indicate this is a group-wide value
-            });
-        }
-    } else {
-        console.log(`Invalid group percentage change: ${groupPercentChange}`);
-    }
-}
+  // Create a message about group selection for percentage change calculation
+  const selectionHint = document.createElement('div');
+  selectionHint.className = 'hint-text mb-2';
+  selectionHint.innerHTML = `
+    <i class="fa fa-chart-line"></i> Select groups to view their percentage change calculations on the chart.
+    If no groups are selected, the percentage change for all data will be shown.
+  `;
+  groupListDiv.appendChild(selectionHint);
+  
+  // Clear All Selections button
+  if (selectedGroups.length > 0) {
+    const clearSelectionBtn = document.createElement('button');
+    clearSelectionBtn.className = 'btn mb-2';
+    clearSelectionBtn.innerHTML = '<i class="fa fa-times-circle"></i> Clear All Selections';
+    clearSelectionBtn.onclick = () => {
+      selectedGroups = [];
+      updateGroupList();
+      updatePlot(filteredData);
+      showMessage('Cleared all group selections', 'info');
+    };
+    groupListDiv.appendChild(clearSelectionBtn);
+  }
 
-/**
- * Updates the chart with the provided data
- * @param {Array} dataToDisplay - The data to display on the chart
- */
-function updateChart(dataToDisplay) {
-    // Use the appropriate data source
-    const dataToUse = dataToDisplay || (filteredData.length > 0 ? filteredData : parsedData);
+  // Create group items
+  currentGroups.forEach(group => {
+    const groupItem = document.createElement('div');
+    groupItem.className = 'group-item';
+    groupItem.style.borderLeftColor = group.color;
     
-    console.log(`Updating chart with ${dataToUse.length} data points`);
+    // Create a header container to hold the name and actions 
+    const headerContainer = document.createElement('div');
+    headerContainer.className = 'group-item-header';
     
-    // Filter out removed points for chart display only
-    const visibleData = dataToUse.filter(point => 
-        !removedPoints.some(removedPoint => removedPoint.station === point.station)
-    );
+    // Group header with color indicator and name
+    const groupHeader = document.createElement('h4');
     
-    console.log(`${dataToUse.length - visibleData.length} points are hidden from chart`);
+    const colorIndicator = document.createElement('span');
+    colorIndicator.className = 'group-color';
+    colorIndicator.style.backgroundColor = group.color;
     
-    // Filter out points without signal values for chart display
-    const chartableData = visibleData.filter(point => 
-        point.current !== undefined || point[activeParameter] !== undefined
-    );
+    const groupName = document.createElement('span');
+    groupName.textContent = `${group.name} (${group.points.length} points)`;
     
-    console.log(`${visibleData.length - chartableData.length} points don't have signal values and won't be shown on chart`);
+    groupHeader.appendChild(colorIndicator);
+    groupHeader.appendChild(groupName);
     
-    // Determine which parameter to use for the y-axis (prefer current if available)
-    const displayParameter = chartableData.some(point => point.current !== undefined) ? 'current' : activeParameter;
+    // Group actions container
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'group-item-actions';
     
-    // Prepare chart data
-    let datasets = [
-        {
-            label: `Current (dBmA)`,
-            data: chartableData.map(item => ({ 
-                x: item.station, 
-                y: item.current !== undefined ? item.current : item[activeParameter] 
-            })),
-            backgroundColor: 'rgba(0, 123, 255, 0.7)',
-            borderColor: 'rgb(0, 123, 255)',
-            borderWidth: 2,
-            pointRadius: 3,
-            pointHoverRadius: 5,
-            type: 'scatter',
-            yAxisID: 'y',
-            order: 1,
-            showLine: true,
-            tension: 0.1 // Adds slight curve to the line for better visualization
+    // Visibility toggle
+    const toggleBtn = document.createElement('button');
+    toggleBtn.innerHTML = group.visible ? 
+      '<i class="fa fa-eye" title="Hide group"></i>' : 
+      '<i class="fa fa-eye-slash" title="Show group"></i>';
+    toggleBtn.title = group.visible ? 'Hide group' : 'Show group';
+    toggleBtn.onclick = () => {
+      group.visible = !group.visible;
+      
+      // If the group is now hidden, also remove it from selected groups if it was selected
+      if (!group.visible) {
+        const selIndex = selectedGroups.indexOf(group.id);
+        if (selIndex !== -1) {
+          selectedGroups.splice(selIndex, 1);
         }
-    ];
+      }
+      
+      updateGroupList();
+      updatePlot(filteredData);
+      showMessage(`Group "${group.name}" ${group.visible ? 'visible' : 'hidden'}`, 'info');
+    };
     
-    // Filter groups by current RID
-    const ridGroups = currentRID 
-        ? customGroups.filter(group => group.rid === currentRID && group.visible)
-        : [];
+    // Select for percentage calculation button
+    const selectForCalcBtn = document.createElement('button');
+    const isSelected = selectedGroups.includes(group.id);
+    selectForCalcBtn.innerHTML = isSelected ?
+      '<i class="fa fa-chart-bar" style="color: #4caf50;" title="Unselect for percentage calculation"></i>' :
+      '<i class="fa fa-chart-bar" title="Select for percentage calculation"></i>';
+    selectForCalcBtn.title = isSelected ? 'Unselect for percentage calculation' : 'Select for percentage calculation';
     
-    // Calculate percentage change data for all visible data
-    let allPercentageChanges = calculatePercentageChange(chartableData);
-    
-    // Track if any group percentage changes were added
-    let groupPercentageChangesAdded = false;
-    
-    // Calculate percentage changes for each custom group
-    if (ridGroups.length > 0) {
-        ridGroups.forEach(group => {
-            // Skip if group has less than 2 points (need at least 2 for percentage change)
-            if (group.points.length < 2) return;
-            
-            // Calculate percentage changes for this group
-            const groupPercentageChanges = calculatePercentageChange(group.points, group);
-            
-            if (groupPercentageChanges.length > 0) {
-                groupPercentageChangesAdded = true;
-                
-                // Create a slightly transparent version of the group color for the bars
-                let barColor = group.color;
-                
-                // If color is in hex format, convert to rgba
-                if (barColor.startsWith('#')) {
-                    const r = parseInt(barColor.slice(1, 3), 16);
-                    const g = parseInt(barColor.slice(3, 5), 16);
-                    const b = parseInt(barColor.slice(5, 7), 16);
-                    barColor = `rgba(${r}, ${g}, ${b}, 0.7)`;
-                }
-                
-                // Sort the points by station
-                const sortedPoints = [...group.points].sort((a, b) => a.station - b.station);
-                
-                // Get the first and last points in the group
-                const firstPoint = sortedPoints[0];
-                const lastPoint = sortedPoints[sortedPoints.length - 1];
-                
-                // Get the percentage change value (all points have the same value)
-                const percentChangeValue = groupPercentageChanges[0].percentChange;
-                
-                // Create a custom dataset for a continuous bar
-                // Instead of creating a data point for each station, we'll create a special dataset
-                // that will be rendered as a continuous bar spanning from first to last point
-                
-                // Add percentage change dataset for this group as a continuous bar
-                datasets.push({
-                    label: `${group.name} % Change`,
-                    // Empty data array - we don't need actual points
-                    data: [],
-                    backgroundColor: barColor.replace(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/, 'rgba($1, $2, $3, 0.5)'), // More transparent
-                    borderColor: group.color,
-                    borderWidth: 1,
-                    // Use special properties for continuous bar rendering
-                    yAxisID: 'y1',
-                    order: 0,
-                    groupId: group.id,
-                    // Add custom properties for the continuous bar
-                    continuousBar: true,
-                    startX: firstPoint.station,
-                    endX: lastPoint.station,
-                    barValue: percentChangeValue
-                });
-            }
-        });
+    // Only enable for visible groups with enough data points
+    const hasEnoughPoints = group.points.length >= 2;
+    if (!hasEnoughPoints || !group.visible) {
+      selectForCalcBtn.disabled = true;
+      selectForCalcBtn.title = !hasEnoughPoints ? 
+        'Group needs at least 2 points for calculation' : 
+        'Group must be visible to calculate percentage changes';
     }
     
-    // Add percentage change dataset if we have data AND no group percentage changes were added
-    if (allPercentageChanges.length > 0 && !groupPercentageChangesAdded) {
-        datasets.push({
-            label: '% Current Change/100 ft',
-            data: allPercentageChanges.map(item => ({ x: item.station, y: item.percentChange })),
-            backgroundColor: 'rgba(255, 165, 0, 0.7)', // Orange
-            borderColor: 'rgb(255, 165, 0)', // Orange
-            borderWidth: 1,
-            pointRadius: 0, // No points for bar chart
-            pointHoverRadius: 0,
-            barPercentage: 0.3, // Reduce bar width to prevent overlap
-            categoryPercentage: 0.5,
-            type: 'bar',
-            yAxisID: 'y1', // Use right y-axis
-            order: 0
-        });
-    }
-    
-    // Add anomaly points if available (filter out removed points)
-    const anomalyPoints = visibleData.filter(item => item.anomaly > 0);
-    if (anomalyPoints.length > 0) {
-        datasets.push({
-            label: `Anomalies (${anomalyPoints.length} points)`,
-            data: anomalyPoints.map(item => ({ 
-                x: item.station, 
-                y: item[displayParameter] !== undefined ? item[displayParameter] : item[activeParameter] 
-            })),
-            backgroundColor: 'rgba(255, 206, 86, 0.7)',
-            borderColor: 'rgb(255, 206, 86)',
-            borderWidth: 2,
-            pointRadius: 5,
-            pointHoverRadius: 7,
-            pointStyle: 'triangle',
-            type: 'scatter',
-            yAxisID: 'y',
-            order: 0
-        });
-    }
-    
-    // Add custom groups to datasets (filter out removed points)
-    datasets = updateChartWithCustomGroups(datasets);
-    
-    // Add transition bars between adjacent groups if we have visible groups
-    if (ridGroups && ridGroups.length >= 2) {
-        console.log(`Adding transition bars between ${ridGroups.length} groups`);
-        datasets = addGroupTransitionBars(datasets, ridGroups);
-    } else {
-        console.log('Not enough groups for transition bars:', ridGroups ? ridGroups.length : 0);
-    }
-    
-    // Create or update chart
-    if (chart) {
-        try {
-            // Update datasets without triggering a full redraw
-            chart.data.datasets = datasets;
-            
-            // Update axis labels based on active parameter
-            chart.options.scales.y.title.text = 'Current (dBmA)';
-            chart.options.scales.y.title.color = '#fff';
-            chart.options.scales.y.title.font = {
-                size: 16,
-                weight: 'bold'
-            };
-            
-            // Remove threshold line annotation if it exists
-            if (chart.options.plugins.annotation) {
-                chart.options.plugins.annotation.annotations = {};
-            }
-            
-            // Update the chart
-            chart.update();
-        } catch (error) {
-            console.error('Error updating existing chart:', error);
-            // If updating fails, destroy the chart and create a new one
-            chart.destroy();
-            chart = null;
-            // The chart will be recreated below
+    selectForCalcBtn.onclick = () => {
+      if (isSelected) {
+        // Remove from selected groups
+        const index = selectedGroups.indexOf(group.id);
+        if (index !== -1) {
+          selectedGroups.splice(index, 1);
         }
-    }
+        showMessage(`Group "${group.name}" removed from percentage calculation`, 'info');
+      } else {
+        // Add to selected groups
+        selectedGroups.push(group.id);
+        showMessage(`Group "${group.name}" added to percentage calculation`, 'info');
+      }
+      updateGroupList();
+      updatePlot(filteredData);
+    };
     
-    // Create a new chart if it doesn't exist or was destroyed
-    if (!chart) {
-        try {
-            const chartElement = document.getElementById('data-chart');
-            if (!chartElement) {
-                console.error('Chart element not found');
-                return;
-            }
-            
-            const ctx = chartElement.getContext('2d');
-            chart = new Chart(ctx, {
-                type: 'scatter',
-                data: {
-                    datasets: datasets
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: {
-                        duration: 500
-                    },
-                    interaction: {
-                        mode: 'nearest',
-                        intersect: true, // Change to true to only show tooltip when hovering directly over a point
-                    },
-                    // Add auto-fit functionality
-                    onResize: function(chart, size) {
-                        // Adjust the chart to fit the screen
-                        setTimeout(() => {
-                            // Reset zoom to fit all data
-                            if (chart.scales.x && chart.scales.y) {
-                                chart.resetZoom();
-                            }
-                        }, 100);
-                    },
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                            labels: {
-                                color: '#fff',
-                                font: {
-                                    size: 12
-                                },
-                                usePointStyle: true
-                            }
-                        },
-                        tooltip: {
-                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
-                            titleColor: '#fff',
-                            bodyColor: '#fff',
-                            titleFont: {
-                                size: 14,
-                                weight: 'bold'
-                            },
-                            bodyFont: {
-                                size: 13
-                            },
-                            padding: 10,
-                            cornerRadius: 4,
-                            displayColors: true,
-                            callbacks: {
-                                title: function(tooltipItems) {
-                                    const item = tooltipItems[0];
-                                    return `Station: ${formatStation(item.parsed.x)}`;
-                                },
-                                label: function(context) {
-                                    const label = context.dataset.label || '';
-                                    const value = context.parsed.y;
-                                    
-                                    // Check if this is any kind of percentage change dataset (using the y1 axis)
-                                    if (context.dataset.yAxisID === 'y1') {
-                                        return `${label}: ${value.toFixed(3)}%`;
-                                    }
-                                    
-                                    // For all other datasets (main data on y axis)
-                                    return `${label}: ${value.toFixed(2)} dBmA`;
-                                }
-                            }
-                        },
-                        annotation: {
-                            annotations: {}
-                        },
-                        zoom: {
-                            limits: {
-                                y: {min: 'original', max: 'original'},
-                                y1: {min: 0} // Ensure Y1 axis never goes below 0
-                            },
-                            zoom: {
-                                wheel: {
-                                    enabled: true,  // Enable zooming with mouse wheel
-                                },
-                                mode: 'xy',  // Allow zooming on both axes
-                                onZoom: function({ chart }) {
-                                    const y1Scale = chart.scales.y1;
-                                    if (y1Scale.min < 0) {
-                                        y1Scale.min = 0; // Prevent the Y1 axis from moving downward
-                                        chart.update();
-                                    }
-                                }
-                            },
-                            pan: {
-                                enabled: true,
-                                mode: 'xy'  // Allow panning on both axes
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            type: 'linear',
-                            position: 'bottom',
-                            title: {
-                                display: true,
-                                text: 'Station',
-                                color: '#fff',
-                                font: {
-                                    size: 16,
-                                    weight: 'bold'
-                                }
-                            },
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#fff',
-                                callback: function(value) {
-                                    return formatStation(value);
-                                }
-                            }
-                        },
-                        y: {
-                            title: {
-                                display: true,
-                                text: 'Current (dBmA)',
-                                color: '#fff',
-                                font: {
-                                    size: 16,
-                                    weight: 'bold'
-                                }
-                            },
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#fff'
-                            }
-                        },
-                        y1: {
-                            type: 'linear',
-                            position: 'right',
-                            title: {
-                                display: true,
-                                text: '% Current Change/100 ft',
-                                color: 'rgb(255, 165, 0)',
-                                font: {
-                                    size: 16,
-                                    weight: 'bold'
-                                }
-                            },
-                            grid: {
-                                drawOnChartArea: false // Only show grid lines for the left y-axis
-                            },
-                            ticks: {
-                                color: 'rgb(255, 165, 0)',
-                                callback: function(value) {
-                                    // The value is already in decimal form (e.g., 0.001 for 0.001%)
-                                    // Just format it with 3 decimal places and add % sign
-                                    return (value * 100).toFixed(3) + '%';
-                                },
-                                // Ensure we have approximately 10 ticks for good detail
-                                count: 11,
-                                precision: 4, // Higher precision for small values
-                                stepSize: 0.0001 // Use 0.0001 increments (which will display as 0.001%)
-                            },
-                            min: 0, // Keeps the bottom of Y1 axis fixed at 0
-                            // We'll dynamically adjust the max based on data in resetAxisZoom
-                            suggestedMax: 0.01, // Start with a higher default max (1%) for better visibility
-                            beginAtZero: true
-                        }
-                    }
-                }
-            });
-        } catch (error) {
-            console.error('Error creating new chart:', error);
-            showMessage('Error creating chart: ' + error.message, 'error');
-            return;
+    // Edit name button
+    const editBtn = document.createElement('button');
+    editBtn.innerHTML = '<i class="fa fa-edit" title="Rename group"></i>';
+    editBtn.title = 'Rename group';
+    editBtn.onclick = () => {
+      const newName = prompt('Enter new name for group:', group.name);
+      if (newName && newName.trim()) {
+        group.name = newName.trim();
+        updateGroupList();
+        updatePlot(filteredData);
+        showMessage(`Group renamed to "${group.name}"`, 'success');
+      }
+    };
+    
+    // Delete button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.innerHTML = '<i class="fa fa-trash" title="Delete group"></i>';
+    deleteBtn.title = 'Delete group';
+    deleteBtn.onclick = () => {
+      if (confirm(`Are you sure you want to delete the group "${group.name}"?`)) {
+        const index = customGroups.findIndex(g => g.id === group.id);
+        if (index !== -1) {
+          // Also remove from selected groups if it was selected
+          const selIndex = selectedGroups.indexOf(group.id);
+          if (selIndex !== -1) {
+            selectedGroups.splice(selIndex, 1);
+          }
+          
+          customGroups.splice(index, 1);
+          updateGroupList();
+          updatePlot(filteredData);
+          showMessage(`Group "${group.name}" deleted`, 'info');
         }
+      }
+    };
+    
+    // Add all buttons to the actions div
+    actionsDiv.appendChild(toggleBtn);
+    actionsDiv.appendChild(selectForCalcBtn);
+    actionsDiv.appendChild(editBtn);
+    actionsDiv.appendChild(deleteBtn);
+    
+    // Add elements to header container
+    headerContainer.appendChild(groupHeader);
+    headerContainer.appendChild(actionsDiv);
+    
+    // Add header container to group item
+    groupItem.appendChild(headerContainer);
+    
+    // Add group item to the list
+    groupListDiv.appendChild(groupItem);
+    
+    // Add stats for selected groups
+    if (isSelected && group.visible && group.points.length >= 2) {
+      // Calculate percentage changes for this group
+      const groupPercentageChanges = calculatePercentageChange(group.points, group);
+      
+      // Calculate average percentage change if there are values
+      if (groupPercentageChanges.length > 0) {
+        const avgChange = groupPercentageChanges.reduce((sum, pc) => sum + pc.percentChange, 0) / groupPercentageChanges.length;
         
-        // Reset axis zoom to ensure proper Y1 axis range
-        resetAxisZoom();
-    }
-    
-    // Add selected points as a separate dataset if any are selected
-    updateSelectionDisplay();
-    
-    // Always reset axis zoom to ensure proper Y1 axis range
-    // This makes the "Fit to Screen" behavior automatic
-    resetAxisZoom();
-    
-    // We've moved the zoom state saving to the specific functions that modify zoom
-}
-
-/**
- * Formats a station number to the 00+00 format
- * @param {number} station - The station number to format
- * @returns {string} - Formatted station string
- */
-function formatStation(station) {
-    if (isNaN(station)) return '';
-    
-    // Split the station into whole and decimal parts
-    const wholePart = Math.floor(station / 100);
-    const decimalPart = Math.round(station % 100);
-    
-    // Format as 00+00
-    return `${wholePart}+${decimalPart.toString().padStart(2, '0')}`;
-}
-
-/**
- * Updates the output display with data statistics
- * @param {Array} data - The data to display statistics for
- */
-function updateOutputDisplay(data) {
-    // Calculate statistics
-    const totalPoints = data.length;
-    
-    const selectedCount = selectedDataPoints.length;
-    const selectedPercentage = selectedCount > 0 ? ((selectedCount / totalPoints) * 100).toFixed(2) : 0;
-    
-    // Get the stats container
-    const statsGrid = document.querySelector('.stats-grid');
-    if (!statsGrid) return;
-    
-    // Clear previous stats
-    statsGrid.innerHTML = '';
-    
-    // Create stat boxes
-    const statBoxes = [
-        {
-            label: 'Total Data Points',
-            value: totalPoints
-        }
-    ];
-    
-    // Add POINTTYPE stats
-    const pointTypes = {};
-    data.forEach(point => {
-        if (point.pointtype) {
-            const type = point.pointtype.toUpperCase();
-            pointTypes[type] = (pointTypes[type] || 0) + 1;
-        }
-    });
-    
-    // Add each point type to the stats
-    Object.keys(pointTypes).forEach(type => {
-        const count = pointTypes[type];
-        const percentage = ((count / totalPoints) * 100).toFixed(1);
-        statBoxes.push({
-            label: `${type} Points`,
-            value: count,
-            subtext: `${percentage}% of total`
-        });
-    });
-    
-    // Add selection stats if points are selected
-    if (selectedCount > 0) {
-        statBoxes.push(
-            {
-                label: 'Selected Points',
-                value: selectedCount,
-                subtext: `${selectedPercentage}% of total`
-            }
-        );
-    }
-    
-    // Add custom group stats
-    const ridGroups = currentRID 
-        ? customGroups.filter(group => group.rid === currentRID)
-        : [];
-        
-    if (ridGroups.length > 0) {
-        // Add a section for custom groups
-        const groupsSection = document.createElement('div');
-        groupsSection.className = 'custom-groups-summary';
-        groupsSection.innerHTML = '<h3>Custom Groups</h3>';
-        statsGrid.appendChild(groupsSection);
-        
-        // Add stats for each group
-        ridGroups.forEach(group => {
-            // Create a stat box for this group, regardless of point count
-            const groupBox = document.createElement('div');
-            groupBox.className = 'stat-box';
-            groupBox.style.borderColor = group.color;
-            
-            let avgPercentChangeText = '';
-            
-            // Only calculate percentage changes if we have at least 2 points
-            if (group.points.length >= 2) {
-                // Calculate percentage changes for this group
-                const groupPercentageChanges = calculatePercentageChange(group.points, group);
-                
-                // Calculate average percentage change
-                const avgPercentChange = groupPercentageChanges.length > 0 
-                    ? groupPercentageChanges.reduce((sum, item) => sum + item.percentChange, 0) / groupPercentageChanges.length 
-                    : 0;
-                
-                avgPercentChangeText = `Avg % Change: ${avgPercentChange.toFixed(3)}%`;
-            } else {
-                avgPercentChangeText = 'Not enough points for % change';
-            }
-            
-            groupBox.innerHTML = `
-                <div class="stat-label">${group.name}</div>
-                <div class="stat-value">${group.points.length} points</div>
-                <div class="stat-subtext">${avgPercentChangeText}</div>
-            `;
-            
-            statsGrid.appendChild(groupBox);
-        });
-    }
-    
-    // Add stat boxes to the grid
-    statBoxes.forEach(stat => {
-        const box = document.createElement('div');
-        box.className = 'stat-box';
-        
-        box.innerHTML = `
-            <div class="stat-label">${stat.label}</div>
-            <div class="stat-value">${stat.value}</div>
-            ${stat.subtext ? `<div class="stat-subtext">${stat.subtext}</div>` : ''}
+        const groupStats = document.createElement('div');
+        groupStats.className = 'group-stats';
+        groupStats.innerHTML = `
+          <div class="stat-item">
+            <div class="stat-value">${avgChange.toFixed(2)}%</div>
+            <div class="stat-label">Avg Change/100ft</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">${groupPercentageChanges.length}</div>
+            <div class="stat-label">Data Points</div>
+          </div>
         `;
         
-        statsGrid.appendChild(box);
-    });
-    
-    // Update selection details if points are selected
-    updateSelectionDetails();
+        groupItem.appendChild(groupStats);
+      }
+    }
+  });
 }
 
-/**
- * Updates the chart to display selected points
- */
-function updateSelectionDisplay() {
-    if (!chart) return;
-    
-    // If there are no selected points, just update the chart datasets
-    if (selectedDataPoints.length === 0) {
-        // Remove the selection dataset if it exists
-        chart.data.datasets = chart.data.datasets.filter(dataset => dataset.label !== 'Selected Points');
-        chart.update();
-        return;
+/************************************************************
+ * Leaflet Map Functions
+ ************************************************************/
+function initMap() {
+  try {
+    if (typeof L === 'undefined') {
+      console.error("Leaflet library not loaded");
+      return;
     }
+
+    // Check if map was previously initialized
+    if (mapInitialized && mapInstance) {
+      console.log("Map already initialized");
+      return;
+    }
+
+    console.log("Starting map initialization...");
+
+    // Get map container element
+    const mapContainer = document.getElementById('map');
+    if (!mapContainer) {
+      console.warn("Map container element not found.");
+      return;
+    }
+
+    // Create map instance
+    mapInstance = L.map('map', {
+      center: [45.0, -93.0],  // Default center (adjust as needed)
+      zoom: 6,               // Default zoom level
+      maxZoom: 18,
+      minZoom: 2
+    });
+
+    // Define base tile layers
+    const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19
+    });
     
-    console.log(`Updating selection display with ${selectedDataPoints.length} selected points`);
+    // Google Satellite layer
+    const googleSat = L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+      attribution: '&copy; Google Maps',
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+      maxZoom: 20
+    });
     
-    // Calculate selection statistics
-    const minStation = Math.min(...selectedDataPoints.map(p => p.station));
-    const maxStation = Math.max(...selectedDataPoints.map(p => p.station));
-    
-    // Determine which parameter to use for the y-axis (prefer current if available)
-    const displayParameter = selectedDataPoints.some(point => point.current !== undefined) ? 'current' : activeParameter;
-    
-    // Calculate average using the display parameter
-    const avgValue = selectedDataPoints.reduce((sum, p) => {
-        const value = p[displayParameter] !== undefined ? p[displayParameter] : p[activeParameter];
-        return sum + value;
-    }, 0) / selectedDataPoints.length;
-    
-    // Find the selection dataset if it exists
-    let selectionDatasetIndex = chart.data.datasets.findIndex(dataset => dataset.label === 'Selected Points');
-    
-    // Create the selection dataset
-    const selectionDataset = {
-        label: 'Selected Points',
-        data: selectedDataPoints.map(item => ({ 
-            x: item.station, 
-            y: item.current !== undefined ? item.current : item[activeParameter] 
-        })),
-        backgroundColor: 'rgba(255, 0, 0, 0.7)', // Red
-        borderColor: 'rgb(255, 0, 0)',
-        borderWidth: 2,
-        pointRadius: 6,
-        pointHoverRadius: 8,
-        type: 'scatter',
-        yAxisID: 'y',
-        order: 0 // Draw on top
+    // Define basemap options - simplified to just the two requested options
+    const baseMaps = {
+      "Standard Map": osmLayer,
+      "Google Satellite": googleSat
     };
     
-    // Update or add the selection dataset
-    if (selectionDatasetIndex !== -1) {
-        chart.data.datasets[selectionDatasetIndex] = selectionDataset;
-    } else {
-        chart.data.datasets.push(selectionDataset);
-    }
+    // Add the OpenStreetMap layer to the map by default
+    osmLayer.addTo(mapInstance);
     
-    // Update the chart
-    chart.update();
-    
-    // Update the output display with the new selection
-    // Use filteredData if available, otherwise use parsedData
-    const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-    
-    // Update selection details
-    updateSelectionDetails();
-    
-    // Show success message for better user feedback
-    showMessage(`Selected ${selectedDataPoints.length} points from station ${formatStation(minStation)} to ${formatStation(maxStation)}.`, 'success');
-}
+    // Add layer control to the map
+    L.control.layers(baseMaps, null, {
+      collapsed: false,
+      position: 'topright'
+    }).addTo(mapInstance);
 
-/**
- * Handles parameter change (disabled since we're using a fixed parameter)
- */
-function handleParameterChange() {
-    // Fixed to use 'signal' parameter
-    activeParameter = 'signal';
-    
-    if (parsedData.length > 0) {
-        processAndDisplayData();
-    }
-}
+    // Add scale control
+    L.control.scale().addTo(mapInstance);
 
-/**
- * Clears the current selection
- */
-function clearSelection() {
-    selectedDataPoints = [];
+    // Add a legend to explain the different marker types
+    const legend = L.control({ position: 'bottomright' });
     
-    // Disable and reset grouping controls
-    if (groupNameInput) {
-        groupNameInput.disabled = true;
-        groupNameInput.value = '';
-    }
-    if (applyGroupBtn) applyGroupBtn.disabled = true;
-    
-    // Refresh the display using safe update
-    if (chart) {
-        safeChartUpdate();
-    } else {
-        const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-        updateOutputDisplay(dataToUse);
-    }
-    
-    // Clear selection rectangle if it exists
-    if (selectedArea) {
-        selectedArea.remove();
-        selectedArea = null;
-    }
-    
-    showMessage('Selection cleared.', 'success');
-}
-
-/**
- * Handles downloading data in various formats
- * @param {string} format - The format to download in (csv, excel, json, summary, pdf)
- */
-function handleDownloadData(format = 'csv') {
-    if (parsedData.length === 0) {
-        showMessage('No data to download. Please upload a file first.', 'error');
-        return;
-    }
-    
-    try {
-        // Calculate percentage changes for all data
-        const percentageChanges = calculatePercentageChange(parsedData);
-        
-        // Create a map of station to percentage change for easy lookup
-        const percentageChangeMap = {};
-        const actualPercentageChangeMap = {};
-        percentageChanges.forEach(item => {
-            percentageChangeMap[item.station] = item.percentChange;
-            actualPercentageChangeMap[item.station] = item.actualPercentChange || item.percentChange;
-        });
-        
-        // Calculate percentage changes for each custom group
-        const groupPercentageChangeMaps = {};
-        const groupMembership = {}; // Track which group each point belongs to
-        
-        // Calculate percentage changes for all groups regardless of RID
-        customGroups.forEach(group => {
-            // Store each point's group membership regardless of count
-            group.points.forEach(point => {
-                groupMembership[point.station] = {
-                    groupId: group.id,
-                    groupName: group.name
-                };
-            });
-            
-            // Only calculate percentage changes if we have enough points
-            if (group.points.length >= 2) {
-                const groupChanges = calculatePercentageChange(group.points, group);
-                
-                // Create maps for this group
-                if (!groupPercentageChangeMaps[group.id]) {
-                    groupPercentageChangeMaps[group.id] = {};
-                }
-                
-                // Store percentage changes by station
-                groupChanges.forEach(item => {
-                    groupPercentageChangeMaps[group.id][item.station] = {
-                        percentChange: item.percentChange,
-                        actualPercentChange: item.actualPercentChange || item.percentChange,
-                        groupName: group.name
-                    };
-                });
-            }
-        });
-        
-        // Identify group transitions to calculate between-group changes
-        const betweenGroupChanges = calculateBetweenGroupChanges();
-        
-        // Prepare data for export - include original data fields plus our calculated values
-        const exportData = parsedData.map(item => {
-            // Start with a copy of all original data fields - this preserves ALL original data
-            const exportItem = { ...item };
-            
-            // Check if point is in a custom group using the groupMembership map
-            let customGroupName = '';
-            let customGroupId = null;
-            
-            if (groupMembership[item.station]) {
-                customGroupName = groupMembership[item.station].groupName;
-                customGroupId = groupMembership[item.station].groupId;
-            }
-            
-            // Remove only UI-specific fields, keep all data fields
-            delete exportItem.above_threshold;
-            delete exportItem.group_category;
-            delete exportItem.selected;
-            delete exportItem.color;
-            
-            // Add the essential analysis fields
-            exportItem.group = customGroupName || '';
-            exportItem['% Current Change/100 ft'] = percentageChangeMap[item.station] !== undefined ? 
-                percentageChangeMap[item.station].toFixed(3) + '%' : '';
-            exportItem['Actual % Current Change/100 ft'] = actualPercentageChangeMap[item.station] !== undefined ? 
-                actualPercentageChangeMap[item.station].toFixed(3) + '%' : '';
-            
-            // Add group-specific percentage change if available
-            if (customGroupId && groupPercentageChangeMaps[customGroupId] && 
-                groupPercentageChangeMaps[customGroupId][item.station]) {
-                const groupChange = groupPercentageChangeMaps[customGroupId][item.station];
-                exportItem['Group % Change/100 ft'] = groupChange.percentChange.toFixed(3) + '%';
-                exportItem['Group Actual % Change/100 ft'] = groupChange.actualPercentChange.toFixed(3) + '%';
-            } else {
-                exportItem['Group % Change/100 ft'] = '';
-                exportItem['Group Actual % Change/100 ft'] = '';
-            }
-            
-            // Add between-group transition calculations if this is the last point of a group
-            // before another group starts
-            if (betweenGroupChanges[item.station]) {
-                const transition = betweenGroupChanges[item.station];
-                exportItem['Next Group'] = transition.nextGroupName;
-                exportItem['Between Groups % Change/100 ft'] = transition.percentChange.toFixed(3) + '%';
-                exportItem['Between Groups Actual % Change/100 ft'] = transition.actualPercentChange.toFixed(3) + '%';
-            } else {
-                exportItem['Next Group'] = '';
-                exportItem['Between Groups % Change/100 ft'] = '';
-                exportItem['Between Groups Actual % Change/100 ft'] = '';
-            }
-            
-            // Ensure current field is included (convert from item.current property)
-            if (item.current !== undefined) {
-                // Store as a number, not a string, so it's properly formatted in Excel
-                exportItem['Current (dBmA)'] = Number(item.current);
-            } else {
-                exportItem['Current (dBmA)'] = '';
-            }
-            
-            // Ensure SIGNAL field is preserved even if blank
-            if ('signal' in item) {
-                exportItem.signal = item.signal;
-            }
-            
-            // Ensure pointtype is preserved
-            if ('pointtype' in item) {
-                exportItem.pointtype = item.pointtype;
-            }
-            
-            return exportItem;
-        });
-        
-        // Download in the selected format
-        switch (format.toLowerCase()) {
-            case 'csv':
-                downloadCSV(exportData);
-                break;
-            case 'excel':
-                downloadExcel(exportData);
-                break;
-            case 'json':
-                downloadJSON(exportData);
-                break;
-            case 'pdf':
-                // For PDF, we need to pass the data and chart
-                generatePDFReport(exportData);
-                break;
-            default:
-                downloadCSV(exportData);
-        }
-    } catch (error) {
-        console.error('Error preparing data for download:', error);
-        showMessage(`Error preparing data for download: ${error.message}`, 'error');
-    }
-}
-
-/**
- * Downloads data as CSV file
- * @param {Array} data - The data to download
- */
-function downloadCSV(data) {
-    try {
-        // Get all unique keys from the data objects
-        const keys = new Set();
-        data.forEach(item => {
-            Object.keys(item).forEach(key => keys.add(key));
-        });
-        const headers = Array.from(keys);
-        
-        // Create CSV header row
-        let csvContent = headers.join(',') + '\n';
-        
-        // Add data rows
-        data.forEach(item => {
-            const row = headers.map(header => {
-                // Get the value or empty string if not present
-                const value = item[header] !== undefined ? item[header] : '';
-                
-                // Handle values with commas, quotes, or newlines by wrapping in quotes
-                if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
-                    // Escape any quotes by doubling them
-                    return `"${value.replace(/"/g, '""')}"`;
-                }
-                return value;
-            }).join(',');
-            
-            csvContent += row + '\n';
-        });
-        
-        // Create a Blob with the CSV content
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        
-        // Create a download link and trigger the download
-        const link = document.createElement('a');
-        const url = URL.createObjectURL(blob);
-        link.setAttribute('href', url);
-        link.setAttribute('download', 'pcm_data_export.csv');
-        link.style.visibility = 'hidden';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        
-        showMessage('Data exported successfully in CSV format.', 'success');
-    } catch (error) {
-        console.error('Error generating CSV:', error);
-        showMessage(`Error generating CSV: ${error.message}`, 'error');
-    }
-}
-
-/**
- * Downloads data as Excel file
- * @param {Array} data - The data to download
- */
-function downloadExcel(data) {
-    try {
-        // Create a new workbook
-        const wb = XLSX.utils.book_new();
-        
-        // Ensure data is properly formatted
-        const formattedData = data.map(item => {
-            const formattedItem = {};
-            // Iterate through all properties to ensure they're properly formatted
-            for (const key in item) {
-                // Keep all original data fields, even if blank
-                if (typeof item[key] === 'number') {
-                    // Keep numeric values as numbers for proper Excel formatting
-                    formattedItem[key] = item[key];
-                } else if (item[key] === undefined || item[key] === null) {
-                    // Preserve empty fields as empty strings
-                    formattedItem[key] = '';
-                } else {
-                    // Keep all other values as is
-                    formattedItem[key] = item[key];
-                }
-            }
-            return formattedItem;
-        });
-        
-        // Convert data to worksheet
-        const ws = XLSX.utils.json_to_sheet(formattedData);
-        
-        // Add worksheet to workbook
-        XLSX.utils.book_append_sheet(wb, ws, "PCM Data");
-        
-        // Generate Excel file and trigger download
-        XLSX.writeFile(wb, "pcm_data_export.xlsx");
-        
-        showMessage('Data exported successfully in Excel format.', 'success');
-    } catch (error) {
-        console.error('Error generating Excel file:', error);
-        showMessage(`Error generating Excel file: ${error.message}`, 'error');
-    }
-}
-
-/**
- * Downloads data as JSON file
- * @param {Array} data - The data to download
- */
-function downloadJSON(data) {
-    try {
-        // Convert data to JSON string with pretty formatting
-        const jsonString = JSON.stringify(data, null, 2);
-        
-        // Create a Blob with the JSON content
-        const blob = new Blob([jsonString], { type: 'application/json' });
-        
-        // Create a download link and trigger the download
-        const link = document.createElement('a');
-        const url = URL.createObjectURL(blob);
-        link.setAttribute('href', url);
-        link.setAttribute('download', 'pcm_data_export.json');
-        link.style.visibility = 'hidden';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        
-        showMessage('Data exported successfully in JSON format.', 'success');
-    } catch (error) {
-        console.error('Error generating JSON:', error);
-        showMessage(`Error generating JSON: ${error.message}`, 'error');
-    }
-}
-
-/**
- * Generates a PDF report with data visualization and analysis
- * @param {Array} data - The data to include in the report
- * @param {Array} aboveThreshold - Data points above threshold
- * @param {Array} belowThreshold - Data points below threshold
- */
-function generatePDFReport(data, aboveThreshold, belowThreshold) {
-    try {
-        // Capture chart image first
-        captureChartImage().then(chartImage => {
-            // Then capture map image
-            captureMapImage().then(mapImage => {
-                // Create PDF document
-                const { jsPDF } = window.jspdf;
-                const doc = new jsPDF({
-                    orientation: 'portrait',
-                    unit: 'mm',
-                    format: 'a4'
-                });
-                
-                // Add title
-                doc.setFontSize(18);
-                doc.setTextColor(0, 51, 102);
-                doc.text('PCM Data Analysis Report', 105, 15, { align: 'center' });
-                
-                // Add date
-                doc.setFontSize(10);
-                doc.setTextColor(100, 100, 100);
-                const today = new Date();
-                doc.text(`Generated on: ${today.toLocaleDateString()} ${today.toLocaleTimeString()}`, 105, 22, { align: 'center' });
-                
-                // Add chart image
-                if (chartImage) {
-                    doc.addImage(chartImage, 'PNG', 15, 30, 180, 80);
-                    doc.setFontSize(12);
-                    doc.setTextColor(0, 0, 0);
-                    doc.text('Figure 1: PCM Data Visualization', 105, 115, { align: 'center' });
-                }
-                
-                // Add map image if available
-                let yPos = 120;
-                if (mapImage) {
-                    doc.addImage(mapImage, 'PNG', 15, yPos, 180, 80);
-                    yPos += 85;
-                    doc.setFontSize(12);
-                    doc.text('Figure 2: Geographic Distribution', 105, yPos, { align: 'center' });
-                    yPos += 10;
-                }
-                
-                // Add data summary
-                doc.setFontSize(14);
-                doc.setTextColor(0, 51, 102);
-                yPos += 5;
-                doc.text('Data Summary', 15, yPos);
-                yPos += 8;
-                
-                // Add summary table
-                doc.setFontSize(10);
-                doc.setTextColor(0, 0, 0);
-                
-                // Calculate statistics
-                const totalPoints = data.length;
-                const groupACount = aboveThreshold.length;
-                const groupBCount = belowThreshold.length;
-                const groupAPercentage = ((groupACount / totalPoints) * 100).toFixed(1);
-                const groupBPercentage = ((groupBCount / totalPoints) * 100).toFixed(1);
-                
-                // Count points with current values
-                const pointsWithCurrent = data.filter(point => point['Current (dBmA)'] !== undefined).length;
-                const pointsWithCurrentPercentage = ((pointsWithCurrent / totalPoints) * 100).toFixed(1);
-                
-                // Count points with percentage change values
-                const pointsWithPercentChange = data.filter(point => point.percent_change_per_100ft !== '').length;
-                const pointsWithPercentChangePercentage = ((pointsWithPercentChange / totalPoints) * 100).toFixed(1);
-                
-                // Count points in custom groups
-                const pointsInGroups = data.filter(point => point.group !== '').length;
-                const pointsInGroupsPercentage = ((pointsInGroups / totalPoints) * 100).toFixed(1);
-                
-                // Create summary table
-                const summaryData = [
-                    ['Total Data Points', totalPoints.toString()],
-                    ['Points Above Threshold', `${groupACount} (${groupAPercentage}%)`],
-                    ['Points Below Threshold', `${groupBCount} (${groupBPercentage}%)`],
-                    ['Points with Current (dBmA)', `${pointsWithCurrent} (${pointsWithCurrentPercentage}%)`],
-                    ['Points with % Change Values', `${pointsWithPercentChange} (${pointsWithPercentChangePercentage}%)`],
-                    ['Points in Custom Groups', `${pointsInGroups} (${pointsInGroupsPercentage}%)`]
-                ];
-                
-                doc.autoTable({
-                    startY: yPos,
-                    head: [['Metric', 'Value']],
-                    body: summaryData,
-                    theme: 'grid',
-                    headStyles: { fillColor: [0, 51, 102], textColor: [255, 255, 255] },
-                    margin: { left: 15, right: 15 },
-                    styles: { overflow: 'linebreak' },
-                    columnStyles: { 0: { cellWidth: 80 }, 1: { cellWidth: 80 } }
-                });
-                
-                yPos = doc.lastAutoTable.finalY + 10;
-                
-                // Add custom groups summary if any exist
-                const uniqueGroups = [...new Set(data.filter(item => item.group !== '').map(item => item.group))];
-                
-                if (uniqueGroups.length > 0) {
-                    // Add new page if needed
-                    if (yPos > 240) {
-                        doc.addPage();
-                        yPos = 20;
-                    }
-                    
-                    doc.setFontSize(14);
-                    doc.setTextColor(0, 51, 102);
-                    doc.text('Custom Groups', 15, yPos);
-                    yPos += 8;
-                    
-                    // Create groups table data
-                    const groupsTableData = uniqueGroups.map(groupName => {
-                        const groupPoints = data.filter(point => point.group === groupName);
-                        return [
-                            groupName,
-                            groupPoints.length.toString(),
-                            ((groupPoints.length / totalPoints) * 100).toFixed(1) + '%'
-                        ];
-                    });
-                    
-                    doc.autoTable({
-                        startY: yPos,
-                        head: [['Group Name', 'Points Count', '% of Total']],
-                        body: groupsTableData,
-                        theme: 'grid',
-                        headStyles: { fillColor: [0, 51, 102], textColor: [255, 255, 255] },
-                        margin: { left: 15, right: 15 },
-                        styles: { overflow: 'linebreak' }
-                    });
-                    
-                    yPos = doc.lastAutoTable.finalY + 10;
-                }
-                
-                // Add data sample (first 10 rows)
-                if (data.length > 0) {
-                    // Add new page
-                    doc.addPage();
-                    
-                    doc.setFontSize(14);
-                    doc.setTextColor(0, 51, 102);
-                    doc.text('Data Sample', 15, 20);
-                    
-                    // Get key columns for the sample
-                    const sampleData = data.slice(0, 10).map(item => {
-                        return {
-                            'Station': item.station,
-                            'Signal (mA)': item.signal,
-                            'Current (dBmA)': item['Current (dBmA)'] || '',
-                            '% Change/100ft': item['% Current Change/100 ft'] || '',
-                            'Group': item.group || ''
-                        };
-                    });
-                    
-                    // Create table headers from the first item's keys
-                    const headers = Object.keys(sampleData[0]);
-                    
-                    // Create table body
-                    const tableBody = sampleData.map(item => {
-                        return headers.map(header => item[header] !== undefined ? item[header].toString() : '');
-                    });
-                    
-                    doc.autoTable({
-                        startY: 28,
-                        head: [headers],
-                        body: tableBody,
-                        theme: 'grid',
-                        headStyles: { fillColor: [0, 51, 102], textColor: [255, 255, 255] },
-                        margin: { left: 15, right: 15 },
-                        styles: { overflow: 'linebreak', cellPadding: 2 },
-                        columnStyles: { 0: { cellWidth: 25 } }
-                    });
-                }
-                
-                // Add notes section
-                const reportNotes = document.getElementById('report-notes');
-                if (reportNotes && reportNotes.value.trim()) {
-                    // Add new page if needed
-                    if (doc.lastAutoTable.finalY > 240) {
-                        doc.addPage();
-                        yPos = 20;
-                    } else {
-                        yPos = doc.lastAutoTable.finalY + 15;
-                    }
-                    
-                    doc.setFontSize(14);
-                    doc.setTextColor(0, 51, 102);
-                    doc.text('Notes', 15, yPos);
-                    yPos += 8;
-                    
-                    doc.setFontSize(10);
-                    doc.setTextColor(0, 0, 0);
-                    
-                    // Split notes into lines to fit the page width
-                    const textLines = doc.splitTextToSize(reportNotes.value, 180);
-                    doc.text(textLines, 15, yPos);
-                }
-                
-                // Add footer with page numbers
-                const pageCount = doc.getNumberOfPages();
-                for (let i = 1; i <= pageCount; i++) {
-                    doc.setPage(i);
-                    doc.setFontSize(8);
-                    doc.setTextColor(100, 100, 100);
-                    doc.text(`Page ${i} of ${pageCount}`, 105, 290, { align: 'center' });
-                    doc.text('PCM Data Grouping Tool', 15, 290);
-                    doc.text(today.toLocaleDateString(), 195, 290, { align: 'right' });
-                }
-                
-                // Save the PDF
-                doc.save('pcm_data_report.pdf');
-                
-                showMessage('PDF report generated successfully.', 'success');
-            }).catch(error => {
-                console.error('Error capturing map image:', error);
-                showMessage('Error generating PDF report: Could not capture map image.', 'error');
-            });
-        }).catch(error => {
-            console.error('Error capturing chart image:', error);
-            showMessage('Error generating PDF report: Could not capture chart image.', 'error');
-        });
-    } catch (error) {
-        console.error('Error generating PDF report:', error);
-        showMessage(`Error generating PDF report: ${error.message}`, 'error');
-    }
-}
-
-/**
- * Captures the chart as an image
- * @returns {Promise<string>} Promise resolving to chart image data URL
- */
-function captureChartImage() {
-    return new Promise((resolve, reject) => {
-        const chartCanvas = document.getElementById('data-chart');
-        if (!chartCanvas || !chart) {
-            reject(new Error('Chart not initialized'));
-            return;
-        }
-        
-        try {
-            // Save current chart state
-            const originalAnimation = chart.options.animation;
-            
-            // Temporarily disable animations for clean capture
-            chart.options.animation = false;
-            
-            // Ensure axis labels are visible
-            chart.options.scales.x.title.display = true;
-            chart.options.scales.x.title.color = '#000';
-            chart.options.scales.x.title.font = {
-                size: 16,
-                weight: 'bold'
-            };
-            
-            chart.options.scales.y.title.display = true;
-            chart.options.scales.y.title.color = '#000';
-            chart.options.scales.y.title.font = {
-                size: 16,
-                weight: 'bold'
-            };
-            
-            // Update chart with print-friendly colors
-            chart.options.scales.x.grid.color = 'rgba(0, 0, 0, 0.1)';
-            chart.options.scales.y.grid.color = 'rgba(0, 0, 0, 0.1)';
-            chart.options.scales.x.ticks.color = '#000';
-            chart.options.scales.y.ticks.color = '#000';
-            
-            // Update legend for print
-            chart.options.plugins.legend.labels.color = '#000';
-            
-            // Apply changes
-            chart.update();
-            
-            // Capture the chart
-            const chartImage = chartCanvas.toDataURL('image/png');
-            
-            // Restore original settings
-            chart.options.animation = originalAnimation;
-            chart.options.scales.x.title.color = '#fff';
-            chart.options.scales.y.title.color = '#fff';
-            chart.options.scales.x.grid.color = 'rgba(255, 255, 255, 0.2)';
-            chart.options.scales.y.grid.color = 'rgba(255, 255, 255, 0.2)';
-            chart.options.scales.x.ticks.color = '#fff';
-            chart.options.scales.y.ticks.color = '#fff';
-            chart.options.plugins.legend.labels.color = '#fff';
-            
-            // Apply restoration
-            chart.update();
-            
-            resolve(chartImage);
-        } catch (error) {
-            console.error('Error capturing chart image:', error);
-            reject(error);
-        }
-    });
-}
-
-/**
- * Captures an image of the map with data points
- * @returns {Promise<string>} - Promise that resolves with the map image
- */
-function captureMapImage() {
-    return new Promise((resolve, reject) => {
-        if (!map) {
-            reject(new Error('Map not initialized'));
-            return;
-        }
-        
-        let tempMapContainer;
-        
-        try {
-            // Create a temporary container for the map capture
-            tempMapContainer = document.createElement('div');
-            tempMapContainer.id = 'temp-map-container-' + Date.now();
-            tempMapContainer.style.width = '800px';
-            tempMapContainer.style.height = '500px';
-            tempMapContainer.style.position = 'absolute';
-            tempMapContainer.style.left = '-9999px';
-            document.body.appendChild(tempMapContainer);
-            
-            // Create a temporary map for the capture
-            const tempMap = L.map(tempMapContainer, {
-                center: map.getCenter(),
-                zoom: map.getZoom(),
-                zoomControl: false,
-                attributionControl: false
-            });
-            
-            // Get the current active base layer
-            let activeBaseLayer = null;
-            map.eachLayer(layer => {
-                if (layer instanceof L.TileLayer) {
-                    activeBaseLayer = layer;
-                }
-            });
-            
-            // Add the same tile layer to the temp map
-            if (activeBaseLayer) {
-                const tileUrl = activeBaseLayer._url;
-                const tileOptions = { ...activeBaseLayer.options };
-                L.tileLayer(tileUrl, tileOptions).addTo(tempMap);
-            } else {
-                // Fallback to OpenStreetMap if no active layer detected
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                    maxZoom: 19
-                }).addTo(tempMap);
-            }
-            
-            // Use the appropriate data source
-            const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-            
-            // Helper function to add a marker with coordinates
-            const addMarker = (point, options) => {
-                let lat, lng;
-                
-                if (point.latitude !== undefined && point.longitude !== undefined) {
-                    lat = point.latitude;
-                    lng = point.longitude;
-                } else if (point.y !== undefined && point.x !== undefined) {
-                    lat = point.y;
-                    lng = point.x;
-                } else {
-                    return; // Skip points without coordinates
-                }
-                
-                // Create marker based on pointtype
-                let marker;
-                
-                if (point.pointtype) {
-                    if (point.pointtype.toUpperCase() === 'POINT GENERIC') {
-                        // Use a square marker for Point Generic
-                        const squareIcon = L.divIcon({
-                            className: 'custom-marker square-marker',
-                            html: `<div style="width: 12px; height: 12px; background-color: rgb(255, 165, 0); border: 1px solid #000;"></div>`,
-                            iconSize: [12, 12],
-                            iconAnchor: [6, 6]
-                        });
-                        
-                        marker = L.marker([lat, lng], {
-                            icon: squareIcon
-                        });
-                    } 
-                    else if (point.pointtype.toUpperCase() === 'SETUP LOCATION') {
-                        // Use a triangle marker for Setup Location
-                        const triangleIcon = L.divIcon({
-                            className: 'custom-marker triangle-marker',
-                            html: `<div style="width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 12px solid rgb(0, 128, 0); border-top: none;"></div>`,
-                            iconSize: [12, 12],
-                            iconAnchor: [6, 6]
-                        });
-                        
-                        marker = L.marker([lat, lng], {
-                            icon: triangleIcon
-                        });
-                    }
-                    else {
-                        // Default circle marker for SIGNAL and other types
-                        marker = L.circleMarker([lat, lng], {
-                            radius: 6,
-                            fillColor: 'rgb(0, 123, 255)', // Blue for SIGNAL
-                            color: '#000',
-                            weight: 1,
-                            opacity: 1,
-                            fillOpacity: 0.8
-                        });
-                    }
-                }
-                else {
-                    // Default circle marker for points without a pointtype
-                    marker = L.circleMarker([lat, lng], {
-                        radius: 6,
-                        fillColor: 'rgb(0, 123, 255)',
-                        color: '#000',
-                        weight: 1,
-                        opacity: 1,
-                        fillOpacity: 0.8
-                    });
-                }
-                
-                // Add popup with information
-                marker.bindPopup(`
-                    <strong>Station:</strong> ${formatStation(point.station)}<br>
-                    ${point[activeParameter] !== undefined ? 
-                        `<strong>${activeParameter}:</strong> ${point[activeParameter].toFixed(2)} dBmA<br>` : ''}
-                    <strong>Coordinates:</strong> (${lat.toFixed(6)}, ${lng.toFixed(6)})
-                    ${point.pointtype ? `<br><strong>Point Type:</strong> ${point.pointtype}` : ''}
-                `);
-                
-                marker.addTo(map);
-                mapMarkers.push(marker);
-            };
-            
-            // Add all data points with default color
-            dataToUse.forEach(point => {
-                addMarker(point, {
-                    radius: 6,
-                    fillColor: 'rgb(0, 123, 255)', // Use a single color for all points - updated to match chart line color
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            });
-            
-            // Add custom group points with their respective colors
-            const ridGroups = currentRID 
-                ? customGroups.filter(group => group.rid === currentRID && group.visible)
-                : [];
-                
-            ridGroups.forEach(group => {
-                group.points.forEach(point => {
-                    addMarker(point, {
-                        radius: 6,
-                        fillColor: group.color,
-                        color: '#000',
-                        weight: 1,
-                        opacity: 1,
-                        fillOpacity: 0.8
-                    });
-                });
-            });
-            
-            // Add selected points
-            selectedDataPoints.forEach(point => {
-                addMarker(point, {
-                    radius: 6,
-                    fillColor: 'rgb(255, 99, 132)',
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            });
-            
-            // Fit bounds to all points
-            const allPoints = [...dataToUse, ...selectedDataPoints];
-            const bounds = [];
-            
-            allPoints.forEach(point => {
-                if (point.latitude !== undefined && point.longitude !== undefined) {
-                    bounds.push([point.latitude, point.longitude]);
-                } else if (point.y !== undefined && point.x !== undefined) {
-                    bounds.push([point.y, point.x]);
-                }
-            });
-            
-            if (bounds.length > 0) {
-                tempMap.fitBounds(bounds);
-            }
-            
-            // Wait for tiles to load
-            setTimeout(() => {
-                // Use html2canvas to capture the map
-                html2canvas(tempMapContainer).then(canvas => {
-                    const dataUrl = canvas.toDataURL('image/png');
-                    document.body.removeChild(tempMapContainer);
-                    resolve(dataUrl);
-                }).catch(error => {
-                    console.error('Error capturing map:', error);
-                    if (document.body.contains(tempMapContainer)) {
-                        document.body.removeChild(tempMapContainer);
-                    }
-                    reject(error);
-                });
-            }, 1000);
-        } catch (error) {
-            console.error('Error setting up map capture:', error);
-            if (tempMapContainer && document.body.contains(tempMapContainer)) {
-                document.body.removeChild(tempMapContainer);
-            }
-            reject(error);
-        }
-    });
-}
-
-/**
- * Adds markers to the map for the given points
- * @param {Array} points - The points to add markers for
- * @param {string} color - The color for the markers
- * @param {string} label - The label for the markers
- */
-function addMarkersToMap(points, color, label) {
-    if (!map) return;
-    
-    points.forEach(point => {
-        // Check for latitude/longitude or x/y coordinates
-        let lat, lng;
-        
-        if (point.latitude !== undefined && point.longitude !== undefined) {
-            lat = point.latitude;
-            lng = point.longitude;
-        } else if (point.y !== undefined && point.x !== undefined) {
-            // Use y as latitude and x as longitude
-            lat = point.y;
-            lng = point.x;
-        } else {
-            // Skip points without coordinates
-            return;
-        }
-        
-        let marker;
-        
-        // Create appropriate marker based on pointtype
-        if (point.pointtype) {
-            if (point.pointtype.toUpperCase() === 'POINT GENERIC') {
-                // Use a square marker for Point Generic, but with the group color
-                const squareIcon = L.divIcon({
-                    className: 'custom-marker square-marker',
-                    html: `<div style="width: 12px; height: 12px; background-color: ${color}; border: 1px solid #000;"></div>`,
-                    iconSize: [12, 12],
-                    iconAnchor: [6, 6]
-                });
-                
-                marker = L.marker([lat, lng], {
-                    icon: squareIcon
-                });
-            } 
-            else if (point.pointtype.toUpperCase() === 'SETUP LOCATION') {
-                // Use a triangle marker for Setup Location, but with the group color
-                const triangleIcon = L.divIcon({
-                    className: 'custom-marker triangle-marker',
-                    html: `<div style="width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 12px solid ${color}; border-top: none;"></div>`,
-                    iconSize: [12, 12],
-                    iconAnchor: [6, 6]
-                });
-                
-                marker = L.marker([lat, lng], {
-                    icon: triangleIcon
-                });
-            }
-            else {
-                // Default circle marker for SIGNAL and other types, with the group color
-                marker = L.circleMarker([lat, lng], {
-                    radius: 6,
-                    fillColor: color,
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            }
-        }
-        else {
-            // Default circle marker for points without a pointtype
-            marker = L.circleMarker([lat, lng], {
-                radius: 6,
-                fillColor: color,
-                color: '#000',
-                weight: 1,
-                opacity: 1,
-                fillOpacity: 0.8
-            });
-        }
-        
-        // Add popup with information
-        marker.bindPopup(`
-            <strong>Station:</strong> ${formatStation(point.station)}<br>
-            ${point[activeParameter] !== undefined ? 
-                `<strong>${activeParameter}:</strong> ${point[activeParameter].toFixed(2)} dBmA<br>` : ''}
-            <strong>Coordinates:</strong> (${lat.toFixed(6)}, ${lng.toFixed(6)})<br>
-            <strong>Group:</strong> ${label}
-            ${point.pointtype ? `<br><strong>Point Type:</strong> ${point.pointtype}` : ''}
-        `);
-        
-        marker.addTo(map);
-        mapMarkers.push(marker);
-    });
-}
-
-/**
- * Clears all markers from the map
- */
-function clearMapMarkers() {
-    if (!map) return;
-    
-    mapMarkers.forEach(marker => {
-        map.removeLayer(marker);
-    });
-    
-    mapMarkers = [];
-}
-
-/**
- * Handles applying a custom group to selected data points
- */
-function handleApplyCustomGroup() {
-    if (selectedDataPoints.length === 0) {
-        showMessage('Please select data points first.', 'error');
-        return;
-    }
-    
-    // Ensure we have a current RID
-    if (!currentRID) {
-        showMessage('Please select a data set (RID) first.', 'error');
-        return;
-    }
-    
-    // Get the next group number for default naming
-    const nextGroupNumber = customGroups.filter(g => g.rid === currentRID).length + 1;
-    
-    // Use the input value or default to "Group X"
-    const groupName = groupNameInput.value.trim() || `Group ${nextGroupNumber}`;
-    
-    // Check if any selected points are already in a group
-    const pointsAlreadyInGroups = [];
-    const pointsToAdd = [];
-    
-    selectedDataPoints.forEach(point => {
-        let isInGroup = false;
-        
-        // Check if this point is already in any group
-        for (const group of customGroups) {
-            if (group.rid === currentRID && 
-                group.points.some(p => p.station === point.station)) {
-                pointsAlreadyInGroups.push(point);
-                isInGroup = true;
-                break;
-            }
-        }
-        
-        if (!isInGroup) {
-            pointsToAdd.push(point);
-        }
-    });
-    
-    // If all points are already in groups, show error message
-    if (pointsToAdd.length === 0) {
-        showMessage('All selected points are already in groups. Please select different points.', 'error');
-        return;
-    }
-    
-    // If some points are already in groups, show warning message
-    if (pointsAlreadyInGroups.length > 0) {
-        showMessage(`${pointsAlreadyInGroups.length} points are already in groups and will be skipped.`, 'warning');
-    }
-    
-    // Create a new group with only the points that aren't already in groups
-    const newGroup = {
-        id: Date.now(), // Unique ID
-        name: groupName, // Set the group name
-        color: groupColors[customGroups.filter(g => g.rid === currentRID).length % groupColors.length],
-        points: pointsToAdd, // Only add points that aren't already in groups
-        visible: true,
-        rid: currentRID // Store the RID this group belongs to
+    legend.onAdd = function(map) {
+      const div = L.DomUtil.create('div', 'map-legend');
+      
+      div.innerHTML = `
+        <div><span class="circle-icon"></span> Standard Point</div>
+        <div><span class="square-icon"></span> Point Generic</div>
+        <div><span class="triangle-icon"></span> Setup Location</div>
+      `;
+      
+      return div;
     };
     
-    // Add to custom groups
-    customGroups.push(newGroup);
-    
-    // Clear selection before updating UI to ensure points show in their group color
-    // instead of the selection color
-    selectedDataPoints = [];
-    
-    // Update UI
-    updateGroupToggles();
-    
-    // Update chart, data summary, and map
-    safeChartUpdate();
-    
-    // Update the data summary
-    const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-    updateOutputDisplay(dataToUse);
-    
-    // Update the map with the current data set
-    updateMapWithAllData(dataToUse);
-    
-    // Reset and disable inputs
-    groupNameInput.value = '';
-    groupNameInput.disabled = true;
-    applyGroupBtn.disabled = true;
-    
-    showMessage(`Created group "${groupName}" with ${newGroup.points.length} points.`, 'success');
-}
+    legend.addTo(mapInstance);
 
-/**
- * Updates the group toggles in the UI
- */
-function updateGroupToggles() {
-    if (!groupTogglesContainer) return;
-    
-    // Clear container
-    groupTogglesContainer.innerHTML = '';
-    
-    // Filter groups by current RID
-    const ridGroups = currentRID 
-        ? customGroups.filter(group => group.rid === currentRID)
-        : [];
-    
-    if (ridGroups.length === 0) {
-        groupTogglesContainer.innerHTML = '<p class="hint-text">No groups defined yet</p>';
-        return;
+    // Set flag indicating the map is initialized
+    mapInitialized = true;
+    mapMarkers = []; // Initialize empty markers array
+    console.log("Map initialized successfully");
+
+    // If we already have filtered data, update the map
+    if (filteredData && filteredData.length > 0) {
+      console.log("Updating map with existing filtered data...");
+      setTimeout(() => {
+        updateMapWithAllData(filteredData);
+      }, 500); // Small delay to ensure map is fully rendered
     }
-    
-    // Add toggle for each group
-    ridGroups.forEach(group => {
-        const toggleElement = document.createElement('div');
-        toggleElement.className = 'group-toggle';
-        
-        // Create checkbox
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = group.visible;
-        checkbox.addEventListener('change', () => {
-            group.visible = checkbox.checked;
-            
-            // Update chart
-            safeChartUpdate();
-            
-            // Update the data summary and map
-            const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-            updateOutputDisplay(dataToUse);
-            updateMapWithAllData(dataToUse);
-        });
-        
-        // Create color indicator
-        const colorIndicator = document.createElement('div');
-        colorIndicator.className = 'color-indicator';
-        colorIndicator.style.backgroundColor = group.color;
-        
-        // Create group name
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'group-name';
-        nameSpan.textContent = `${group.name} (${group.points.length})`;
-        
-        // Create action buttons container
-        const actionButtons = document.createElement('div');
-        actionButtons.className = 'group-actions';
-        
-        // Create edit name button
-        const editNameButton = document.createElement('button');
-        editNameButton.className = 'group-edit-btn';
-        editNameButton.innerHTML = '<i class="fas fa-edit"></i>';
-        editNameButton.title = 'Edit group name';
-        editNameButton.addEventListener('click', () => {
-            const newName = prompt('Enter new group name:', group.name);
-            if (newName && newName.trim()) {
-                group.name = newName.trim();
-                updateGroupToggles();
-                
-                // Update chart
-                safeChartUpdate();
-                
-                // Update the data summary and map
-                const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-                updateOutputDisplay(dataToUse);
-                updateMapWithAllData(dataToUse);
-                
-                showMessage(`Group renamed to "${newName}"`, 'success');
-            }
-        });
-        
-        // Create edit points button
-        const editPointsButton = document.createElement('button');
-        editPointsButton.className = 'group-edit-points-btn';
-        editPointsButton.innerHTML = '<i class="fas fa-object-group"></i>';
-        editPointsButton.title = 'Edit group points';
-        editPointsButton.addEventListener('click', () => {
-            // Confirm before editing
-            if (confirm(`Edit points in group "${group.name}"? This will allow you to select new points or remove existing ones.`)) {
-                // Enter edit mode for this group
-                editGroupPoints(group);
-            }
-        });
-        
-        // Create delete button
-        const deleteButton = document.createElement('button');
-        deleteButton.className = 'group-delete-btn';
-        deleteButton.innerHTML = '<i class="fas fa-trash"></i>';
-        deleteButton.title = 'Delete group';
-        deleteButton.addEventListener('click', () => {
-            if (confirm(`Are you sure you want to delete the group "${group.name}"?`)) {
-                // Remove the group from customGroups
-                const index = customGroups.findIndex(g => g.id === group.id);
-                if (index !== -1) {
-                    customGroups.splice(index, 1);
-                    updateGroupToggles();
-                    
-                    // Update chart
-                    safeChartUpdate();
-                    
-                    // Update the data summary and map
-                    const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-                    updateOutputDisplay(dataToUse);
-                    updateMapWithAllData(dataToUse);
-                    
-                    showMessage(`Group "${group.name}" deleted`, 'success');
-                }
-            }
-        });
-        
-        // Add buttons to action container
-        actionButtons.appendChild(editNameButton);
-        actionButtons.appendChild(editPointsButton);
-        actionButtons.appendChild(deleteButton);
-        
-        // Add elements to toggle
-        toggleElement.appendChild(checkbox);
-        toggleElement.appendChild(colorIndicator);
-        toggleElement.appendChild(nameSpan);
-        toggleElement.appendChild(actionButtons);
-        
-        // Add toggle to container
-        groupTogglesContainer.appendChild(toggleElement);
-    });
+
+  } catch (error) {
+    console.error("Error initializing map:", error);
+    mapInitialized = false;
+  }
 }
 
-/**
- * Shows a message in the message area
- * @param {string} message - The message to display
- * @param {string} type - The type of message ('error' or 'success')
- */
-function showMessage(message, type) {
-    if (!messageArea) {
-        messageArea = document.getElementById('message-area');
-        if (!messageArea) {
-            console.error('Message area element not found');
-            return;
-        }
-    }
-    
-    messageArea.textContent = message;
-    messageArea.className = type;
-    
-    // Hide the message after 5 seconds
-    setTimeout(() => {
-        messageArea.textContent = '';
-        messageArea.className = '';
-    }, 5000);
-}
-
-/**
- * Updates the selection details in the output display
- */
-function updateSelectionDetails() {
-    if (selectedDataPoints.length === 0) return;
-    
-    // Find or create the selection details container
-    let selectionDetails = document.querySelector('.selection-details');
-    if (!selectionDetails) {
-        selectionDetails = document.createElement('div');
-        selectionDetails.className = 'stats-summary selection-details';
-        
-        const heading = document.createElement('h3');
-        heading.textContent = 'Selection Details';
-        selectionDetails.appendChild(heading);
-        
-        const detailsGrid = document.createElement('div');
-        detailsGrid.className = 'stats-grid';
-        selectionDetails.appendChild(detailsGrid);
-        
-        // Add to output data container
-        const outputData = document.getElementById('output-data');
-        if (outputData) {
-            outputData.appendChild(selectionDetails);
-        }
-    }
-    
-    // Get the details grid
-    const detailsGrid = selectionDetails.querySelector('.stats-grid');
-    if (!detailsGrid) return;
-    
-    // Clear previous details
-    detailsGrid.innerHTML = '';
-    
-    // Calculate selection statistics
-    const minStation = Math.min(...selectedDataPoints.map(p => p.station));
-    const maxStation = Math.max(...selectedDataPoints.map(p => p.station));
-    
-    // Determine which parameter to use for the y-axis (prefer current if available)
-    const displayParameter = selectedDataPoints.some(point => point.current !== undefined) ? 'current' : activeParameter;
-    
-    // Calculate min and max values using the display parameter
-    const minValue = Math.min(...selectedDataPoints.map(p => 
-        p[displayParameter] !== undefined ? p[displayParameter] : p[activeParameter]
-    ));
-    const maxValue = Math.max(...selectedDataPoints.map(p => 
-        p[displayParameter] !== undefined ? p[displayParameter] : p[activeParameter]
-    ));
-    
-    // Create detail boxes
-    const detailBoxes = [
-        {
-            label: 'Station Range',
-            value: `${minStation.toFixed(2)} - ${maxStation.toFixed(2)}`
-        },
-        {
-            label: 'Current (dBmA) Range',
-            value: `${minValue.toFixed(2)} - ${maxValue.toFixed(2)}`
-        }
-    ];
-    
-    // Create and append detail boxes
-    detailBoxes.forEach(detail => {
-        const detailBox = document.createElement('div');
-        detailBox.className = 'stat-box';
-        
-        const detailLabel = document.createElement('div');
-        detailLabel.className = 'stat-label';
-        detailLabel.textContent = detail.label;
-        
-        const detailValue = document.createElement('div');
-        detailValue.className = 'stat-value';
-        detailValue.textContent = detail.value;
-        
-        detailBox.appendChild(detailLabel);
-        detailBox.appendChild(detailValue);
-        
-        detailsGrid.appendChild(detailBox);
-    });
-}
-
-/**
- * Updates the map with all data points
- * @param {Array} dataSet - The data to display on the map
- */
 function updateMapWithAllData(dataSet) {
-    if (!map) {
-        console.log('Map not initialized, cannot update');
+  // Check if mapInstance exists and is initialized
+  if (!mapInitialized || !mapInstance) {
+    console.warn("Map not properly initialized. Map update skipped.");
+    // Try to initialize map if Leaflet is available but map isn't initialized yet
+    if (typeof L !== 'undefined' && !mapInitialized) {
+      console.log("Attempting to initialize map now...");
+      initMap();
+      if (!mapInitialized) {
+        console.warn("Could not initialize map. Update skipped.");
         return;
+      }
+    } else {
+      return;
     }
+  }
+  
+  try {
+    console.log(`Updating map with ${dataSet ? dataSet.length : 0} data points...`);
     
     // Clear existing markers
-    clearMapMarkers();
-    
-    // Use provided data or fall back to parsedData
-    const dataToMap = dataSet || parsedData;
-    
-    // Check if we have any geographic data
-    const hasGeoData = dataToMap.some(point => 
-        (point.latitude !== undefined && point.longitude !== undefined) || 
-        (point.x !== undefined && point.y !== undefined)
-    );
-    
-    console.log(`Updating map with ${dataToMap.length} data points, has geographic data: ${hasGeoData}`);
-    
-    if (!hasGeoData) {
-        // No geographic data available
-        const noGeoDataMessage = document.querySelector('.no-geo-data-message');
-        if (noGeoDataMessage) {
-            noGeoDataMessage.style.display = 'flex';
-        }
-        return;
+    mapMarkers.forEach(marker => marker.remove());
+    mapMarkers = [];
+
+    if (!dataSet || dataSet.length === 0) {
+      console.warn("No data provided to update map");
+      return;
     }
-    
-    // Hide the no geo data message if we have data
-    const noGeoDataMessage = document.querySelector('.no-geo-data-message');
-    if (noGeoDataMessage) {
-        noGeoDataMessage.style.display = 'none';
-    }
-    
-    // Count points with valid coordinates
+
     let validPointsCount = 0;
-    const validPoints = [];
-    
-    // Add all data points to the map
-    dataToMap.forEach(point => {
-        // Check for latitude/longitude or x/y coordinates
-        let lat, lng;
+
+    dataSet.forEach(pt => {
+      if (pt.latitude && pt.longitude && !isNaN(pt.latitude) && !isNaN(pt.longitude)) {
+        // Check if this point belongs to any group for the current RID
+        let markerColor = '#ffce56'; // Default color
         
-        if (point.latitude !== undefined && point.longitude !== undefined) {
-            lat = point.latitude;
-            lng = point.longitude;
-            validPointsCount++;
-            validPoints.push([lat, lng]);
-        } else if (point.y !== undefined && point.x !== undefined) {
-            lat = point.y;
-            lng = point.x;
-            validPointsCount++;
-            validPoints.push([lat, lng]);
-        } else {
-            return; // Skip points without coordinates
+        // Find if point belongs to any group
+        if (customGroups && customGroups.length > 0) {
+          for (const group of customGroups) {
+            if (group.rid === currentRID && group.visible) {
+              // Check if point is in this group by comparing station values
+              const foundInGroup = group.points.some(groupPt => 
+                groupPt.station === pt.station && 
+                (groupPt.current === pt.current || (pt.isSpecialPoint && groupPt.isSpecialPoint)));
+              
+              if (foundInGroup) {
+                markerColor = group.color;
+                break; // Stop checking other groups once found
+              }
+            }
+          }
         }
         
         let marker;
         
-        // Create marker based on pointtype
-        if (point.pointtype) {
-            if (point.pointtype.toUpperCase() === 'POINT GENERIC') {
-                // Square marker for Point Generic
-                const squareIcon = L.divIcon({
-                    className: 'custom-marker',
-                    html: '<div class="square-marker"></div>',
-                    iconSize: [20, 20],
-                    iconAnchor: [10, 10]
-                });
-                
-                marker = L.marker([lat, lng], {
-                    icon: squareIcon
-                });
-            } 
-            else if (point.pointtype.toUpperCase() === 'SETUP LOCATION') {
-                // Triangle marker for Setup Location
-                const triangleIcon = L.divIcon({
-                    className: 'custom-marker',
-                    html: '<div class="triangle-marker"></div>',
-                    iconSize: [20, 20],
-                    iconAnchor: [10, 17]
-                });
-                
-                marker = L.marker([lat, lng], {
-                    icon: triangleIcon
-                });
-            }
-            else {
-                // Circle marker for SIGNAL points
-                marker = L.circleMarker([lat, lng], {
-                    radius: 7,
-                    fillColor: '#2196F3',  // Blue for SIGNAL points
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            }
+        // Check for special point types
+        if (pt.pointType) {
+          const pointType = pt.pointType.toUpperCase();
+          
+          if (pointType === 'POINT GENERIC') {
+            // Create a square marker for POINT GENERIC
+            const squareIcon = L.divIcon({
+              className: 'custom-marker',
+              html: `<div style="width: 14px; height: 14px; background-color: #ff6347; border: 2px solid black;"></div>`,
+              iconSize: [18, 18],
+              iconAnchor: [9, 9]
+            });
+            
+            marker = L.marker([pt.latitude, pt.longitude], {
+              icon: squareIcon
+            });
+            validPointsCount++;
+          } 
+          else if (pointType === 'SETUP LOCATION') {
+            // Create a triangle marker for SETUP LOCATION
+            const triangleIcon = L.divIcon({
+              className: 'custom-marker',
+              html: `<div style="width: 0; height: 0; border-left: 9px solid transparent; border-right: 9px solid transparent; border-bottom: 16px solid #32cd32; box-shadow: 0 0 0 2px black;"></div>`,
+              iconSize: [18, 16],
+              iconAnchor: [9, 16]
+            });
+            
+            marker = L.marker([pt.latitude, pt.longitude], {
+              icon: triangleIcon
+            });
+            validPointsCount++;
+          }
+          else {
+            // Create standard circle marker for other points
+            marker = L.circleMarker([pt.latitude, pt.longitude], {
+              radius: 5,
+              fillColor: markerColor,
+              color: markerColor,
+              weight: 1,
+              opacity: 1,
+              fillOpacity: 0.8
+            });
+            validPointsCount++;
+          }
         }
         else {
-            // Default circle marker
-            marker = L.circleMarker([lat, lng], {
-                radius: 7,
-                fillColor: '#2196F3',
-                color: '#000',
-                weight: 1,
-                opacity: 1,
-                fillOpacity: 0.8
-            });
+          // Standard circle marker
+          marker = L.circleMarker([pt.latitude, pt.longitude], {
+            radius: 5,
+            fillColor: markerColor,
+            color: markerColor,
+            weight: 1,
+            opacity: 1,
+            fillOpacity: 0.8
+          });
+          validPointsCount++;
+        }
+
+        // Create popup content based on point type
+        let popupContent = `<strong>Station:</strong> ${pt.station}<br>`;
+        
+        // Add Signal information if available
+        if (pt.signal !== null && pt.signal !== undefined) {
+          popupContent += `<strong>Signal:</strong> ${pt.signal} mA<br>`;
         }
         
-        // Add popup with information
-        marker.bindPopup(`
-            <strong>Station:</strong> ${formatStation(point.station)}<br>
-            ${point[activeParameter] !== undefined ? 
-                `<strong>${activeParameter}:</strong> ${point[activeParameter].toFixed(2)} dBmA<br>` : ''}
-            <strong>Coordinates:</strong> (${lat.toFixed(6)}, ${lng.toFixed(6)})
-            ${point.pointtype ? `<br><strong>Point Type:</strong> ${point.pointtype}` : ''}
-        `);
+        // Add Current information if available
+        if (pt.current !== null && pt.current !== undefined) {
+          popupContent += `<strong>Current:</strong> ${pt.current.toFixed(2)} dBmA<br>`;
+        }
         
-        marker.addTo(map);
+        // Add Point Type information
+        popupContent += `<strong>Point Type:</strong> ${pt.pointType || 'N/A'}`;
+        
+        marker.bindPopup(popupContent);
+        marker.addTo(mapInstance);
         mapMarkers.push(marker);
+      }
     });
     
-    // If we have valid points, fit the map to their bounds
-    if (validPoints.length > 0) {
-        try {
-            map.fitBounds(validPoints);
-        } catch (error) {
-            console.error('Error fitting map to bounds:', error);
-        }
-    }
+    console.log(`Added ${validPointsCount} markers to map`);
     
-    // Add custom group points with their respective colors
-    const ridGroups = currentRID 
-        ? customGroups.filter(group => group.rid === currentRID && group.visible)
-        : [];
-        
-    ridGroups.forEach(group => {
-        addMarkersToMap(group.points, group.color, group.name);
-    });
-    
-    // Add selected points if any
-    if (selectedDataPoints.length > 0) {
-        addMarkersToMap(selectedDataPoints, 'rgb(255, 99, 132)', 'Selected');
+    // Fit map to markers if we have any
+    if (mapMarkers.length > 0) {
+      try {
+        const group = L.featureGroup(mapMarkers);
+        mapInstance.fitBounds(group.getBounds());
+      } catch (fitError) {
+        console.warn("Could not fit map to bounds:", fitError);
+      }
     }
+  } catch (error) {
+    console.error("Error updating map:", error);
+  }
 }
 
-/**
- * Handles the selection of a specific RID from the dropdown
- */
-function handleRIDSelection() {
-    const selectedRID = document.getElementById('rid-select').value;
-    
-    if (!selectedRID) {
-        showMessage('Please select a valid data set', 'warning');
-        return;
-    }
-    
-    // Set the current RID
-    currentRID = selectedRID;
-    
-    // Filter data based on selected RID
-    filteredData = parsedData.filter(item => item.rid === selectedRID);
-    
-    console.log(`Selected RID: ${selectedRID}, found ${filteredData.length} data points`);
-    
-    if (filteredData.length === 0) {
-        showMessage(`No data found for RID: ${selectedRID}`, 'error');
-        return;
-    }
-    
-    // Clear any previously selected data points
-    selectedDataPoints = [];
-    
-    // Organize data parameters for the filtered data
-    organizeDataParameters(filteredData);
-    
-    // Ensure chart is properly destroyed before processing new data
-    if (chart) {
-        chart.destroy();
-        chart = null;
-    }
-    
-    // Process and display the filtered data
-    processAndDisplayData(filteredData);
-    
-    // Ensure chart event listeners are properly set up
-    initializeChartPlugins();
-    
-    // Restore zoom state for this RID if it exists
-    if (chart && zoomStates[currentRID]) {
-        // Apply saved zoom state
-        if (zoomStates[currentRID].y) {
-            chart.options.scales.y.min = zoomStates[currentRID].y.min;
-            chart.options.scales.y.max = zoomStates[currentRID].y.max;
-        }
-        
-        if (zoomStates[currentRID].y1) {
-            chart.options.scales.y1.min = Math.max(0, zoomStates[currentRID].y1.min); // Ensure min is never below 0
-            chart.options.scales.y1.max = zoomStates[currentRID].y1.max;
-        }
-        
-        // Update the chart to apply zoom state
-        chart.update();
-    }
-    
-    // Enable download button and restore points button
-    const downloadButton = document.getElementById('download-btn');
-    const restorePointsBtn = document.getElementById('restore-points-btn');
-    const fitScreenBtn = document.getElementById('fit-screen-btn');
-    if (downloadButton) downloadButton.disabled = false;
-    if (restorePointsBtn) restorePointsBtn.disabled = false;
-    if (fitScreenBtn) fitScreenBtn.disabled = false;
-    
-    // Disable group controls until a selection is made
-    const groupNameInput = document.getElementById('group-name');
-    const applyGroupBtn = document.getElementById('create-group-btn');
-    const deleteGroupBtn = document.getElementById('delete-group-btn');
-    if (groupNameInput) groupNameInput.disabled = true;
-    if (applyGroupBtn) applyGroupBtn.disabled = true;
-    if (deleteGroupBtn) deleteGroupBtn.disabled = true;
-    
-    // Update group toggles to show only groups for this RID
-    updateGroupToggles();
-    
-    showMessage(`Data set ${selectedRID} loaded successfully`, 'success');
+/************************************************************
+ * Toggle Remove Mode
+ ************************************************************/
+function toggleRemoveMode() {
+  isRemoveMode = !isRemoveMode;
+  const removeBtn = document.getElementById('remove-points-btn');
+  removeBtn.textContent = isRemoveMode ? 'Remove Mode (ON)' : 'Remove Points';
+  showMessage(`Remove mode: ${isRemoveMode ? 'ON' : 'OFF'}`, 'info');
 }
 
-/**
- * Restores all removed points to the chart
- */
+/************************************************************
+ * Restore Removed Points
+ ************************************************************/
 function restoreRemovedPoints() {
-    if (removedPoints.length === 0) {
-        showMessage('No points to restore.', 'info');
-        return;
-    }
-    
-    const count = removedPoints.length;
-    removedPoints = [];
-    showMessage(`Restored ${count} removed points to the chart.`, 'success');
-    
-    // Update the chart
-    safeChartUpdate();
+  if (removedPoints.length === 0) {
+    showMessage("No removed points to restore.", "info");
+    return;
+  }
+  
+  // Restore all removed points
+  removedPoints.forEach(pt => (pt.removed = false));
+  showMessage(`Restored ${removedPoints.length} data point(s).`, "success");
+  removedPoints = [];
+  
+  // Sort the data by station before redisplaying
+  const sortedData = [...filteredData];
+  sortedData.sort((a, b) => a.station - b.station);
+  
+  // Update the plot with all points
+  updatePlot(sortedData);
 }
 
-/**
- * Enters edit mode for a group's points
- * @param {Object} group - The group to edit
- */
-function editGroupPoints(group) {
-    // Store the current state of the group's points
-    const originalPoints = [...group.points];
-    
-    // Create a modal overlay
-    const modalOverlay = document.createElement('div');
-    modalOverlay.className = 'modal-overlay';
-    
-    // Create modal content
-    const modalContent = document.createElement('div');
-    modalContent.className = 'modal-content';
-    
-    // Create modal header
-    const modalHeader = document.createElement('h3');
-    modalHeader.textContent = `Edit Points in Group: ${group.name}`;
-    
-    // Create instructions
-    const modalInstructions = document.createElement('p');
-    modalInstructions.innerHTML = `
-        <strong>Instructions:</strong><br>
-        1. Select points on the chart to add to this group<br>
-        2. Hold SHIFT and select points to remove them from the selection<br>
-        3. Click Save Changes when done or Cancel to revert
-    `;
-    
-    // Create button container
-    const buttonContainer = document.createElement('div');
-    buttonContainer.style.display = 'flex';
-    buttonContainer.style.justifyContent = 'space-between';
-    buttonContainer.style.marginTop = '1.5rem';
-    
-    const cancelButton = document.createElement('button');
-    cancelButton.className = 'secondary-btn';
-    cancelButton.textContent = 'Cancel';
-    cancelButton.addEventListener('click', () => {
-        // Restore original points
-        group.points = originalPoints;
-        
-        // Remove the modal
-        document.body.removeChild(modalOverlay);
-        
-        // Clear selection
-        selectedDataPoints = [];
-        
-        // Update the chart
-        safeChartUpdate();
-        
-        showMessage('Group edit cancelled.', 'info');
-    });
-    
-    const saveButton = document.createElement('button');
-    saveButton.className = 'primary-btn';
-    saveButton.textContent = 'Save Changes';
-    saveButton.addEventListener('click', () => {
-        // Check if any selected points are already in other groups
-        const pointsAlreadyInGroups = [];
-        const pointsToAdd = [];
-        
-        selectedDataPoints.forEach(point => {
-            let isInOtherGroup = false;
-            
-            // Check if this point is already in any other group
-            for (const otherGroup of customGroups) {
-                if (otherGroup.rid === currentRID && 
-                    otherGroup.id !== group.id && // Skip the current group being edited
-                    otherGroup.points.some(p => p.station === point.station)) {
-                    pointsAlreadyInGroups.push(point);
-                    isInOtherGroup = true;
-                    break;
-                }
-            }
-            
-            if (!isInOtherGroup) {
-                pointsToAdd.push(point);
-            }
-        });
-        
-        // If some points are already in other groups, show warning message
-        if (pointsAlreadyInGroups.length > 0) {
-            showMessage(`${pointsAlreadyInGroups.length} points are already in other groups and will be skipped.`, 'warning');
-        }
-        
-        // Update the group with the filtered selection
-        group.points = pointsToAdd;
-        
-        // Clear selection before updating UI to ensure points show in their group color
-        // instead of the selection color
-        selectedDataPoints = [];
-        
-        // Remove the modal
-        document.body.removeChild(modalOverlay);
-        
-        // Update the UI
-        updateGroupToggles();
-        safeChartUpdate();
-        
-        // Update the data summary and map
-        const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-        updateOutputDisplay(dataToUse);
-        updateMapWithAllData(dataToUse);
-        
-        showMessage(`Group "${group.name}" updated with ${pointsToAdd.length} points.`, 'success');
-    });
-    
-    // Add buttons to container
-    buttonContainer.appendChild(cancelButton);
-    buttonContainer.appendChild(saveButton);
-    
-    // Add elements to modal
-    modalContent.appendChild(modalHeader);
-    modalContent.appendChild(modalInstructions);
-    modalContent.appendChild(buttonContainer);
-    
-    // Add modal to page
-    modalOverlay.appendChild(modalContent);
-    document.body.appendChild(modalOverlay);
-    
-    // Highlight the group's points on the chart
-    selectedDataPoints = [...group.points];
-    safeChartUpdate();
+/************************************************************
+ * Reset Plot Zoom
+ ************************************************************/
+function resetPlotZoom() {
+  Plotly.relayout('plotly-chart', {
+    'xaxis.autorange': true,
+    'yaxis.autorange': true
+  });
 }
 
-/**
- * Sets up all event listeners for the application
- */
-function setupEventListeners() {
-    // Initialize custom file input styling
-    if (fileInput && fileStatus && dragDropArea) {
-        // Click to browse
-        dragDropArea.addEventListener('click', (e) => {
-            // Only trigger file input click if the click was directly on the drag area
-            // and not on the file input itself
-            if (e.target !== fileInput) {
-                e.preventDefault();
-                fileInput.click();
-            }
-        });
-        
-        // File selected via browse
-        fileInput.addEventListener('change', (e) => {
-            handleFileSelection(e.target.files);
-        });
-        
-        // Drag and drop events
-        dragDropArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dragDropArea.classList.add('drag-over');
-        });
-        
-        dragDropArea.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dragDropArea.classList.remove('drag-over');
-        });
-        
-        dragDropArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dragDropArea.classList.remove('drag-over');
-            
-            if (e.dataTransfer.files.length) {
-                handleFileSelection(e.dataTransfer.files);
-            }
-        });
-    }
-    
-    // Initialize smooth scrolling for navigation
-    const navLinks = document.querySelectorAll('.main-nav a');
-    if (navLinks && navLinks.length > 0) {
-        navLinks.forEach(link => {
-            link.addEventListener('click', (e) => {
-                e.preventDefault();
-                
-                // Remove active class from all links
-                navLinks.forEach(navLink => navLink.classList.remove('active'));
-                
-                // Add active class to clicked link
-                link.classList.add('active');
-                
-                // Scroll to the section
-                const targetId = link.getAttribute('href').substring(1);
-                const targetSection = document.getElementById(targetId);
-                if (targetSection) {
-                    window.scrollTo({
-                        top: targetSection.offsetTop - 20,
-                        behavior: 'smooth'
-                    });
-                }
-            });
-        });
-    }
-    
-    // Modal event listeners
-    const helpLink = document.getElementById('help-link');
-    const infoLink = document.getElementById('info-link');
-    const helpModal = document.getElementById('help-modal');
-    const infoModal = document.getElementById('info-modal');
-    const modalCloseBtns = document.querySelectorAll('.modal-close-btn');
-    
-    if (helpLink && helpModal) {
-        helpLink.addEventListener('click', function(e) {
-            e.preventDefault();
-            helpModal.style.display = 'flex';
-            setTimeout(() => {
-                helpModal.classList.add('active');
-            }, 10);
-        });
-    }
-    
-    if (infoLink && infoModal) {
-        infoLink.addEventListener('click', function(e) {
-            e.preventDefault();
-            infoModal.style.display = 'flex';
-            setTimeout(() => {
-                infoModal.classList.add('active');
-            }, 10);
-        });
-    }
-    
-    // Close modals when close button is clicked
-    modalCloseBtns.forEach(btn => {
-        btn.addEventListener('click', function() {
-            const modal = this.closest('.modal-overlay');
-            modal.classList.remove('active');
-            setTimeout(() => {
-                modal.style.display = 'none';
-            }, 300); // Match the CSS transition duration
-        });
-    });
-    
-    // Close modals when clicking outside of modal content
-    document.addEventListener('click', function(e) {
-        if (e.target.classList.contains('modal-overlay')) {
-            e.target.classList.remove('active');
-            setTimeout(() => {
-                e.target.style.display = 'none';
-            }, 300);
-        }
-    });
-    
-    // Close modals with Escape key
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
-            const openModals = document.querySelectorAll('.modal-overlay.active');
-            openModals.forEach(modal => {
-                modal.classList.remove('active');
-                setTimeout(() => {
-                    modal.style.display = 'none';
-                }, 300);
-            });
-        }
-    });
-    
-    // Set up event listeners for existing functionality
-    if (downloadButton && exportFormatSelect) {
-        downloadButton.addEventListener('click', () => handleDownloadData(exportFormatSelect.value || 'excel'));
-    }
-    
-    // Set up event listeners for grouping functionality
-    if (applyGroupBtn) {
-        applyGroupBtn.addEventListener('click', handleApplyCustomGroup);
-    }
-    
-    // Add keyboard event listeners for point removal feature
-    document.addEventListener('keydown', (e) => {
-        console.log('Key down:', e.key);
-        if (e.key && e.key.toLowerCase() === 'r') {
-            console.log('R key pressed');
-            isRKeyPressed = true;
-            // Change cursor to indicate removal mode is active
-            if (chartCanvas) {
-                chartCanvas.style.cursor = 'crosshair';
-            }
-        }
-    });
-    
-    document.addEventListener('keyup', (e) => {
-        console.log('Key up:', e.key);
-        if (e.key && e.key.toLowerCase() === 'r') {
-            console.log('R key released');
-            isRKeyPressed = false;
-            // Reset cursor
-            if (chartCanvas) {
-                chartCanvas.style.cursor = 'default';
-            }
-        }
-    });
-    
-    // Add event listener to clear selection when clicking outside the chart
-    document.addEventListener('click', (e) => {
-        // If we clicked on the chart or any of its children, do nothing
-        if (chartCanvas && (e.target === chartCanvas || chartCanvas.contains(e.target))) {
-            return;
-        }
-        
-        // If we clicked on a form control in the grouping section, do nothing
-        const groupingSection = document.querySelector('.grouping-section');
-        if (groupingSection && groupingSection.contains(e.target)) {
-            return;
-        }
-        
-        // Otherwise, clear the selection if we have selected points
-        if (selectedDataPoints.length > 0) {
-            clearSelection();
-        }
-    });
-    
-    // Add event listener for restore points button
-    if (restorePointsBtn) {
-        restorePointsBtn.addEventListener('click', restoreRemovedPoints);
-    }
-    
-    // Add event listener for RID selection
-    if (ridSelect) {
-        ridSelect.addEventListener('change', handleRIDSelection);
-    }
-    
-    // Add Y-axis interactivity for zooming and panning
-    if (chartCanvas) {
-        // Add event listeners for axis interaction
-        chartCanvas.addEventListener('wheel', handleAxisWheel, { passive: false });
-        chartCanvas.addEventListener('mousedown', handleAxisMouseDown);
-        chartCanvas.addEventListener('mousemove', handleChartMouseMoveForAxis);
-        chartCanvas.addEventListener('mouseleave', handleChartMouseLeaveForAxis);
-        
-        // Add double-click to reset zoom
-        chartCanvas.addEventListener('dblclick', function(event) {
-            // Reset zoom regardless of where on the chart we click
-            if (chart) {
-                // Use Chart.js resetZoom method to fit all data
-                chart.resetZoom();
-                
-                // Also call our custom resetAxisZoom function for additional adjustments
-                resetAxisZoom();
-                
-                // Prevent default behavior (like text selection)
-                event.preventDefault();
-            }
-        });
-        
-        // Add axis zoom instructions to the visualization controls
-        addAxisZoomInstructions();
-    }
-    
-    // Restore removed points button
-    if (restorePointsBtn) {
-        restorePointsBtn.addEventListener('click', restoreRemovedPoints);
-    }
-    
-    // Fit to screen button
-    if (fitScreenBtn) {
-        fitScreenBtn.addEventListener('click', function() {
-            if (chart) {
-                // Use Chart.js resetZoom method to fit all data
-                chart.resetZoom();
-                
-                // Also call our custom resetAxisZoom function for additional adjustments
-                resetAxisZoom();
-            }
-        });
-    }
+/************************************************************
+ * Data Export
+ ************************************************************/
+function handleDownloadData(format) {
+  // Create dialog to ask if user wants to export all RIDs or just current RID
+  const exportAllRIDs = confirm("Do you want to export ALL RIDs?\n\n- Click 'OK' to export the complete dataset with all RIDs\n- Click 'Cancel' to export only the current RID");
+  
+  // Choose which dataset to export
+  const dataToExport = exportAllRIDs ? parsedData : filteredData;
+  
+  if (dataToExport.length === 0) {
+    showMessage('No data to export.', 'warning');
+    return;
+  }
+
+  // Run test export function to debug
+  console.log("Running test export before actual export");
+  testExportData(dataToExport);
+
+  switch (format) {
+    case 'excel':
+      exportToExcel(dataToExport);
+      break;
+    case 'csv':
+      exportToCSV(dataToExport);
+      break;
+    case 'json':
+      exportToJSON(dataToExport);
+      break;
+    default:
+      showMessage('Unsupported export format.', 'error');
+  }
+  
+  // Show confirmation message
+  const ridInfo = exportAllRIDs 
+    ? `ALL RIDs (${[...new Set(dataToExport.map(d => d.rid))].length} routes)` 
+    : `current RID (${currentRID})`;
+  showMessage(`Exported ${dataToExport.length} data points from ${ridInfo}`, 'success');
 }
 
-/**
- * Generates a PDF report with data and visualizations
- * @param {Array} data - The data to include in the report
- */
-function generatePDFReport(data) {
-    // This is a placeholder for PDF generation functionality
-    // In a real implementation, you would use a library like jsPDF
-    // to generate a PDF with charts, maps, and data tables
+function exportToExcel(data) {
+  if (data.length === 0) {
+    showMessage('No data to export.', 'warning');
+    return;
+  }
+  
+  console.log("Starting Excel export with", data.length, "data points");
+  console.log("Original columns:", originalColumns);
+  
+  // For debugging: check the first data point
+  if (data.length > 0) {
+    console.log("First data point for export:", data[0]);
+    console.log("Field count:", Object.keys(data[0]).length);
     
-    showMessage('PDF report generation is not implemented in this version.', 'error');
-    
-    // Example implementation would be:
-    // 1. Capture chart as image
-    // 2. Capture map as image
-    // 3. Create data tables
-    // 4. Generate PDF with all elements
-    // 5. Trigger download
-}
-
-/**
- * Captures the map as an image for PDF reports
- * @returns {Promise<string>} - Promise resolving to a data URL of the map image
- */
-function captureMapImage() {
-    return new Promise((resolve, reject) => {
-        try {
-            // Create a temporary map container
-            const tempMapContainer = document.createElement('div');
-            tempMapContainer.style.width = '800px';
-            tempMapContainer.style.height = '600px';
-            tempMapContainer.style.position = 'absolute';
-            tempMapContainer.style.left = '-9999px';
-            document.body.appendChild(tempMapContainer);
-            
-            // Create a temporary map
-            const tempMap = L.map(tempMapContainer).setView([0, 0], 2);
-            
-            // Add the same base layer as the main map
-            if (map && map._layers) {
-                // Try to get the active tile layer from the main map
-                let baseLayerFound = false;
-                Object.keys(map._layers).forEach(key => {
-                    const layer = map._layers[key];
-                    if (layer instanceof L.TileLayer) {
-                        // Clone the tile layer to the temp map
-                        L.tileLayer(layer._url, layer.options).addTo(tempMap);
-                        baseLayerFound = true;
-                    }
-                });
-                
-                if (!baseLayerFound) {
-                    // Fallback to OpenStreetMap if no active layer detected
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                        maxZoom: 19
-                    }).addTo(tempMap);
-                }
-            } else {
-                // Fallback to OpenStreetMap if no active layer detected
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                    maxZoom: 19
-                }).addTo(tempMap);
-            }
-            
-            // Helper function to add a marker with coordinates
-            const addMarker = (point, options) => {
-                let lat, lng;
-                
-                if (point.latitude !== undefined && point.longitude !== undefined) {
-                    lat = point.latitude;
-                    lng = point.longitude;
-                } else if (point.y !== undefined && point.x !== undefined) {
-                    lat = point.y;
-                    lng = point.x;
-                } else {
-                    return; // Skip points without coordinates
-                }
-                
-                L.circleMarker([lat, lng], options).addTo(tempMap);
-            };
-            
-            // Add markers for all data points
-            const dataToUse = filteredData.length > 0 ? filteredData : parsedData;
-            
-            // Add all points with default color
-            dataToUse.forEach(point => {
-                addMarker(point, {
-                    radius: 6,
-                    fillColor: 'rgb(75, 192, 192)',
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            });
-            
-            // Add custom group points with their respective colors
-            const ridGroups = currentRID 
-                ? customGroups.filter(group => group.rid === currentRID && group.visible)
-                : [];
-                
-            ridGroups.forEach(group => {
-                group.points.forEach(point => {
-                    addMarker(point, {
-                        radius: 6,
-                        fillColor: group.color,
-                        color: '#000',
-                        weight: 1,
-                        opacity: 1,
-                        fillOpacity: 0.8
-                    });
-                });
-            });
-            
-            // Add selected points
-            selectedDataPoints.forEach(point => {
-                addMarker(point, {
-                    radius: 6,
-                    fillColor: 'rgb(255, 99, 132)',
-                    color: '#000',
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                });
-            });
-            
-            // Fit bounds to all points
-            const allPoints = dataToUse.concat(selectedDataPoints);
-            const validPoints = [];
-            
-            allPoints.forEach(point => {
-                let lat, lng;
-                
-                if (point.latitude !== undefined && point.longitude !== undefined) {
-                    lat = point.latitude;
-                    lng = point.longitude;
-                    validPoints.push([lat, lng]);
-                } else if (point.y !== undefined && point.x !== undefined) {
-                    lat = point.y;
-                    lng = point.x;
-                    validPoints.push([lat, lng]);
-                }
-            });
-            
-            if (validPoints.length > 0) {
-                tempMap.fitBounds(validPoints);
-            }
-            
-            // Wait for tiles to load
-            setTimeout(() => {
-                // Use html2canvas to capture the map
-                html2canvas(tempMapContainer, {
-                    useCORS: true,
-                    allowTaint: true,
-                    backgroundColor: null
-                }).then(canvas => {
-                    // Convert canvas to data URL
-                    const dataUrl = canvas.toDataURL('image/png');
-                    
-                    // Clean up
-                    document.body.removeChild(tempMapContainer);
-                    
-                    resolve(dataUrl);
-                }).catch(error => {
-                    console.error('Error capturing map:', error);
-                    document.body.removeChild(tempMapContainer);
-                    reject(error);
-                });
-            }, 1000); // Wait for tiles to load
-        } catch (error) {
-            console.error('Error setting up map capture:', error);
-            reject(error);
-        }
+    // Check if we have the _originalData property as a backup
+    if (data[0]._originalData) {
+      console.log("Original data is available");
+      console.log("Original data fields:", Object.keys(data[0]._originalData));
+      console.log("Original field count:", Object.keys(data[0]._originalData).length);
+    }
+  }
+  
+  // Detailed logging of which original columns will be exported
+  if (originalColumns && originalColumns.length > 0) {
+    const columnsStatus = originalColumns.map(col => {
+      // Check if at least the first data point has this field
+      const hasField = data.length > 0 && (
+        data[0][col] !== undefined || 
+        (data[0]._originalData && data[0]._originalData[col] !== undefined)
+      );
+      return { column: col, present: hasField };
     });
-}
-
-// Function to handle mouse move over the chart to detect axis hover
-function handleChartMouseMoveForAxis(event) {
-    if (!chart) return;
     
-    const rect = event.target.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    console.log("Original columns export status:", columnsStatus);
     
-    // Get axis dimensions from chart scales
-    // Left Y-axis tick area is typically within 50px of the left edge
-    const leftAxisX = chart.scales.y.left;
-    const leftAxisWidth = chart.scales.y.width;
+    const missingColumns = columnsStatus.filter(c => !c.present).map(c => c.column);
+    if (missingColumns.length > 0) {
+      console.warn("WARNING: Some original columns may be missing in export:", missingColumns);
+    }
+  }
+  
+  // Build a worksheet with all data fields preserved
+  const wsData = data.map(d => {
+    // Start with an empty object for the export row
+    const exportRow = {};
     
-    // Right Y-axis tick area starts at the right edge minus the axis width
-    const rightAxisX = chart.scales.y1.right - chart.scales.y1.width;
-    const rightAxisWidth = chart.scales.y1.width;
-    
-    // X-axis tick area is typically within 30px of the bottom edge
-    const xAxisY = chart.scales.x.bottom;
-    const xAxisHeight = chart.scales.x.height;
-    
-    // More precise detection for the left Y-axis ticks
-    isLeftAxisHovered = (x <= leftAxisX + 8); // Only the tick area, not the entire left side
-    
-    // More precise detection for the right Y-axis ticks
-    isRightAxisHovered = (x >= rightAxisX - 8); // Only the tick area, not the entire right side
-    
-    // Detection for the X-axis ticks
-    isXAxisHovered = (y >= xAxisY - 8 && y <= xAxisY + xAxisHeight + 8);
-    
-    // Change cursor when hovering over an axis
-    if (isLeftAxisHovered) {
-        event.target.style.cursor = 'ns-resize'; // Vertical resize cursor for left axis (pan & zoom)
-    } else if (isRightAxisHovered) {
-        event.target.style.cursor = 'zoom-in'; // Zoom cursor for right axis (zoom only)
-    } else if (isXAxisHovered) {
-        event.target.style.cursor = 'ew-resize'; // Horizontal resize cursor for X axis (pan & zoom)
+    // First, include all fields from the original Excel in their original order
+    if (originalColumns && originalColumns.length > 0) {
+      originalColumns.forEach(col => {
+        // Check different ways the data might be stored
+        if (d[col] !== undefined) {
+          // Direct property match
+          exportRow[col] = d[col];
+        } else if (d._originalData && d._originalData[col] !== undefined) {
+          // Check the backup original data
+          exportRow[col] = d._originalData[col];
+        } else {
+          // Check for camelCase variations
+          const camelCase = col.toLowerCase().replace(/(_)([a-z])/g, (m, p1, p2) => p2.toUpperCase());
+          if (d[camelCase] !== undefined) {
+            exportRow[col] = d[camelCase];
+          } else {
+            // Not found, use empty string
+            exportRow[col] = '';
+          }
+        }
+      });
     } else {
-        event.target.style.cursor = 'default';
-    }
-}
-
-// Function to handle mouse leave events on the chart
-function handleChartMouseLeaveForAxis() {
-    isLeftAxisHovered = false;
-    isRightAxisHovered = false;
-    isXAxisHovered = false;
-}
-
-// Function to handle mouse wheel events for axis zooming
-function handleAxisWheel(event) {
-    if (!chart) return;
-    
-    // Only handle wheel events when hovering over an axis
-    if (!isLeftAxisHovered && !isRightAxisHovered && !isXAxisHovered) return;
-    
-    // Prevent the default scroll behavior
-    event.preventDefault();
-    
-    // Determine which axis to zoom
-    const axisToZoom = isLeftAxisHovered ? 'y' : (isRightAxisHovered ? 'y1' : 'x');
-    
-    // Get the current min and max values for the axis
-    const scale = chart.scales[axisToZoom];
-    let min = scale.min;
-    let max = scale.max;
-    
-    // Calculate the zoom factor based on the wheel delta
-    // Negative delta means zoom in, positive means zoom out
-    const zoomFactor = event.deltaY < 0 ? 0.9 : 1.1;
-    
-    // Calculate the point under the mouse as a percentage of the axis
-    const rect = event.target.getBoundingClientRect();
-    let percent;
-    
-    if (axisToZoom === 'x') {
-        // For X-axis, calculate horizontal percentage
-        percent = (event.clientX - rect.left - chart.chartArea.left) / chart.chartArea.width;
-    } else {
-        // For Y-axes, calculate vertical percentage
-        percent = 1 - (event.clientY - rect.top - chart.chartArea.top) / chart.chartArea.height;
-    }
-    
-    // Clamp percent to [0, 1]
-    percent = Math.max(0, Math.min(1, percent));
-    
-    // Calculate the new min and max values
-    const range = max - min;
-    const newRange = range * zoomFactor;
-    const centerValue = min + range * percent;
-    const newMin = centerValue - newRange * percent;
-    const newMax = centerValue + newRange * (1 - percent);
-    
-    // Special handling for Y1 axis (percentage) - never go below 0
-    if (axisToZoom === 'y1' && newMin < 0) {
-        chart.options.scales[axisToZoom].min = 0;
-        chart.options.scales[axisToZoom].max = newMax;
-    } else {
-        // Set the new min and max values
-        chart.options.scales[axisToZoom].min = newMin;
-        chart.options.scales[axisToZoom].max = newMax;
-    }
-    
-    // Update the chart
-    chart.update();
-    
-    // Save the zoom state for the current RID
-    if (currentRID) {
-        if (!zoomStates[currentRID]) {
-            zoomStates[currentRID] = {};
-        }
-        if (!zoomStates[currentRID][axisToZoom]) {
-            zoomStates[currentRID][axisToZoom] = {};
-        }
-        zoomStates[currentRID][axisToZoom].min = newMin;
-        zoomStates[currentRID][axisToZoom].max = newMax;
-    }
-}
-
-// Variables to track axis dragging
-let isDraggingAxis = false;
-let dragStartY = 0;
-let dragStartX = 0;
-let dragAxisId = null;
-let dragStartMin = 0;
-let dragStartMax = 0;
-
-// Function to handle mouse down events for axis panning
-function handleAxisMouseDown(event) {
-    if (!chart) return;
-    
-    // Handle mouse down events when hovering over any axis
-    if (!isLeftAxisHovered && !isXAxisHovered) return;
-    
-    // Start dragging
-    isDraggingAxis = true;
-    
-    if (isXAxisHovered) {
-        dragStartX = event.clientX;
-        dragAxisId = 'x';
-    } else {
-        dragStartY = event.clientY;
-        dragAxisId = 'y'; // Left Y-axis
-    }
-    
-    // Store current axis min and max
-    dragStartMin = chart.scales[dragAxisId].min;
-    dragStartMax = chart.scales[dragAxisId].max;
-    
-    // Add mouse move and mouse up event listeners to the document
-    document.addEventListener('mousemove', handleAxisDrag);
-    document.addEventListener('mouseup', stopAxisDrag);
-}
-
-// Function to handle axis dragging
-function handleAxisDrag(event) {
-    if (!isDraggingAxis || !chart) return;
-    
-    // Calculate drag distance in pixels
-    const dragDeltaY = event.clientY - dragStartY;
-    
-    // Convert pixel distance to value distance
-    const dragScale = chart.scales[dragAxisId];
-    const pixelToValueRatio = (dragStartMax - dragStartMin) / dragScale.height;
-    const valueDelta = dragDeltaY * pixelToValueRatio;
-    
-    // Calculate new min and max
-    let newMin = dragStartMin + valueDelta;
-    let newMax = dragStartMax + valueDelta;
-    
-    // For y1 axis, ensure we never go below 0
-    if (dragAxisId === 'y1' && newMin < 0) {
-        // Adjust both min and max to keep min at 0 while preserving the range
-        const range = dragStartMax - dragStartMin;
-        newMin = 0;
-        newMax = range;
-    }
-    
-    // Update chart options with new min and max
-    chart.options.scales[dragAxisId].min = newMin;
-    chart.options.scales[dragAxisId].max = newMax;
-    
-    // Update the chart
-    chart.update();
-    
-    // Save zoom state for current RID
-    if (currentRID) {
-        if (!zoomStates[currentRID]) {
-            zoomStates[currentRID] = {};
-        }
-        zoomStates[currentRID].y = {
-            min: chart.scales.y.min,
-            max: chart.scales.y.max
-        };
-        zoomStates[currentRID].y1 = {
-            min: chart.scales.y1.min,
-            max: chart.scales.y1.max
-        };
-    }
-}
-
-// Function to stop axis dragging
-function stopAxisDrag() {
-    isDraggingAxis = false;
-    
-    // Remove event listeners
-    document.removeEventListener('mousemove', handleAxisDrag);
-    document.removeEventListener('mouseup', stopAxisDrag);
-}
-
-// Function to reset axis zoom to default (fit all data)
-function resetAxisZoom() {
-    if (!chart) return;
-    
-    // Reset left Y-axis to auto-fit the data
-    delete chart.options.scales.y.min;
-    delete chart.options.scales.y.max;
-    
-    // Reset X-axis to auto-fit the data
-    delete chart.options.scales.x.min;
-    delete chart.options.scales.x.max;
-    
-    // For right Y-axis (y1), keep min at 0 and find the appropriate max
-    chart.options.scales.y1.min = 0;
-    
-    // Find the maximum percentage value across all datasets to set an appropriate max
-    let maxPercentage = 0.001; // Default minimum (0.1%)
-    
-    if (chart.data && chart.data.datasets) {
-        chart.data.datasets.forEach(dataset => {
-            // Check for percentage datasets (using y1 axis) and continuous bars
-            if ((dataset.yAxisID === 'y1' || dataset.continuousBar) && dataset.barValue !== undefined) {
-                // For continuous bars, check the barValue property
-                if (dataset.barValue > maxPercentage) {
-                    maxPercentage = dataset.barValue;
-                }
-            } else if (dataset.yAxisID === 'y1' && dataset.data) {
-                // For regular datasets, check all data points
-                dataset.data.forEach(point => {
-                    if (point.y !== undefined && point.y > maxPercentage) {
-                        maxPercentage = point.y;
-                    }
-                });
-            }
+      // Fallback: if originalColumns is not available, include all properties
+      // Start with any original data if available
+      if (d._originalData) {
+        Object.keys(d._originalData).forEach(key => {
+          exportRow[key] = d._originalData[key];
         });
-    }
-    
-    // Add 20% padding to the max value for better visibility
-    maxPercentage = maxPercentage * 1.2;
-    
-    // Set the max value for the Y1 axis
-    chart.options.scales.y1.max = maxPercentage;
-    
-    // Adjust tick step size based on the range
-    if (maxPercentage <= 0.001) { // 0.1%
-        chart.options.scales.y1.ticks.stepSize = 0.0001; // 0.01% steps
-    } else if (maxPercentage <= 0.01) { // 1%
-        chart.options.scales.y1.ticks.stepSize = 0.001; // 0.1% steps
-    } else if (maxPercentage <= 0.1) { // 10%
-        chart.options.scales.y1.ticks.stepSize = 0.01; // 1% steps
-    } else {
-        chart.options.scales.y1.ticks.stepSize = 0.05; // 5% steps for larger ranges
-    }
-    
-    console.log(`Resetting Y1 axis with max percentage: ${maxPercentage} (${maxPercentage * 100}%)`);
-    
-    // Update the chart
-    chart.update();
-    
-    // Save the reset zoom state for current RID
-    if (currentRID) {
-        if (!zoomStates[currentRID]) {
-            zoomStates[currentRID] = {};
+      }
+      
+      // Then add all other properties from the processed data
+      Object.keys(d).forEach(key => {
+        // Skip the _originalData property itself
+        if (key !== '_originalData') {
+          exportRow[key] = d[key];
         }
-        // Save the auto-calculated min/max values after chart update
-        zoomStates[currentRID].y = {
-            min: chart.scales.y.min,
-            max: chart.scales.y.max
-        };
-        zoomStates[currentRID].y1 = {
-            min: 0, // Always 0 for y1
-            max: chart.scales.y1.max
-        };
-    }
-}
-
-// Adds instructions for axis zoom and pan functionality below the chart
-function addAxisZoomInstructions() {
-    // Check if instructions already exist
-    if (document.getElementById('axis-zoom-instructions')) {
-        return;
+      });
     }
     
-    // Create instruction element
-    const instructionsEl = document.createElement('p');
-    instructionsEl.id = 'axis-zoom-instructions';
-    instructionsEl.className = 'hint-text';
-    instructionsEl.innerHTML = '<i class="fas fa-info-circle"></i> Hover near Y-axes: <strong>Mouse wheel</strong> to zoom, <strong>Click & drag</strong> to pan, <strong>Double-click</strong> to reset';
+    // Ensure our calculated fields are always included
+    // These might override some original fields, but that's OK
+    exportRow['Station'] = d.station;
+    exportRow['Signal(mA)'] = d.signal;
+    exportRow['Current(dBmA)'] = d.current;
+    exportRow['GroupID'] = d.group;
+    exportRow['Removed'] = d.removed ? 'Yes' : 'No';
     
-    // Add to visualization controls
-    const visualizationControls = document.querySelector('.visualization-controls');
-    if (visualizationControls) {
-        visualizationControls.appendChild(instructionsEl);
-    }
-}
-
-// At the beginning of the file (after the existing barSpanPlugin definition)
-
-// Function to create a single continuous bar for each group
-function createGroupPercentageChangeDataset(group, percentageChange) {
-    // Find the first and last point in the group
-    const sortedPoints = [...group.points].sort((a, b) => a.station - b.station);
-    const firstPoint = sortedPoints[0];
-    const lastPoint = sortedPoints[sortedPoints.length - 1];
-    
-    // Apply a minimum visible value to ensure the bar is visible
-    // If the percentage change is extremely small, we'll use a minimum value of 0.05%
-    let visiblePercentageChange = percentageChange;
-    
-    // Log the actual percentage value for debugging
-    console.log(`Group ${group.name} has percentage change: ${percentageChange.toFixed(5)}%`);
-    
-    // Create the color with transparency
-    let barColor = group.color;
-    if (barColor.startsWith('#')) {
-        const r = parseInt(barColor.slice(1, 3), 16);
-        const g = parseInt(barColor.slice(3, 5), 16);
-        const b = parseInt(barColor.slice(5, 7), 16);
-        barColor = `rgba(${r}, ${g}, ${b}, 0.5)`;
+    // Calculate % Current Change/100ft if group is assigned
+    if (d.group !== null) {
+      // For calculating change, only use points within the same RID
+      const groupPoints = data.filter(p => p.group === d.group && p.rid === d.rid);
+      if (groupPoints.length >= 2) {
+        // Sort by station to find adjacent points
+        groupPoints.sort((a, b) => a.station - b.station);
+        const pointIndex = groupPoints.findIndex(p => p.station === d.station);
+        
+        // If not the last point in group, calculate change to next point
+        if (pointIndex < groupPoints.length - 1) {
+          const nextPoint = groupPoints[pointIndex + 1];
+          const stationDiff = nextPoint.station - d.station;
+          const currentDiff = nextPoint.current - d.current;
+          const changePerFt = currentDiff / stationDiff;
+          const changePer100Ft = changePerFt * 100;
+          exportRow['% Current Change/100ft'] = changePer100Ft.toFixed(4);
+        } else {
+          exportRow['% Current Change/100ft'] = '';
+        }
+      } else {
+        exportRow['% Current Change/100ft'] = '';
+      }
     } else {
-        barColor = barColor.replace(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/, 'rgba($1, $2, $3, 0.5)');
+      exportRow['% Current Change/100ft'] = '';
     }
     
-    // Return the dataset object
-    return {
-        label: `${group.name} % Change`,
-        data: [], // Empty data array - we don't need actual points
-        backgroundColor: barColor,
-        borderColor: group.color,
-        borderWidth: 1,
-        yAxisID: 'y1',
-        continuousBar: true, // Flag for our plugin
-        startX: firstPoint.station, // Start of the bar
-        endX: lastPoint.station,    // End of the bar
-        barValue: visiblePercentageChange    // The percentage change value
+    return exportRow;
+  });
+  
+  // Debug: log the first export row
+  if (wsData.length > 0) {
+    console.log("First row in Excel export data:", wsData[0]);
+    console.log("Excel export row field count:", Object.keys(wsData[0]).length);
+    
+    // Check if any original columns are missing in the export
+    if (originalColumns && originalColumns.length > 0) {
+      const firstExportRow = wsData[0];
+      const missingInExport = originalColumns.filter(col => firstExportRow[col] === undefined);
+      if (missingInExport.length > 0) {
+        console.warn("WARNING: Original columns missing in Excel export:", missingInExport);
+      } else {
+        console.log("All original columns included in Excel export");
+      }
+    }
+  }
+  
+  const wb = XLSX.utils.book_new();
+  
+  // Group the data by RID if multiple RIDs are present
+  const uniqueRIDs = [...new Set(data.map(d => d.rid))];
+  
+  if (uniqueRIDs.length > 1) {
+    // If multiple RIDs, create a separate sheet for each RID
+    uniqueRIDs.forEach(rid => {
+      const ridData = wsData.filter(d => d.rid === rid);
+      if (ridData.length > 0) {
+        const ws = XLSX.utils.json_to_sheet(ridData);
+        XLSX.utils.book_append_sheet(wb, ws, `RID_${rid.toString().replace(/[^a-zA-Z0-9]/g, '_')}`);
+      }
+    });
+    
+    // Also add a sheet with all data combined
+    const wsAll = XLSX.utils.json_to_sheet(wsData);
+    XLSX.utils.book_append_sheet(wb, wsAll, 'All_Data');
+  } else {
+    // If single RID, just create one sheet
+    const ws = XLSX.utils.json_to_sheet(wsData);
+    XLSX.utils.book_append_sheet(wb, ws, 'PCM Data');
+  }
+
+  // Add a summary sheet
+  const summaryData = [
+    ['Total Points', data.length],
+    ['Total RIDs', uniqueRIDs.length],
+    ['RIDs', uniqueRIDs.join(', ')],
+    ['Removed Points', data.filter(d => d.removed).length],
+    ['Groups', [...new Set(data.filter(d => d.group !== null).map(d => d.group))].length]
+  ];
+  const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
+  XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+  // Create the Excel file
+  XLSX.writeFile(wb, 'PCM_Data.xlsx');
+  console.log("Excel export completed");
+}
+
+function exportToCSV(data) {
+  if (data.length === 0) {
+    showMessage('No data to export.', 'warning');
+    return;
+  }
+  
+  console.log("Starting CSV export with", data.length, "data points");
+  
+  // Define the calculated fields to add at the end
+  const calculatedFields = [
+    'Current(dBmA)', 
+    'GroupID',
+    'Removed',
+    '% Current Change/100ft'
+  ];
+  
+  // Final set of columns in order: original columns + calculated fields
+  let csvColumns = [];
+  
+  // First use the original columns if we have them
+  if (originalColumns && originalColumns.length > 0) {
+    csvColumns = [...originalColumns];
+  } else {
+    // Fall back to collecting all possible keys from all data points
+    const allKeys = new Set();
+    
+    // First add all keys from the original data
+    if (window.originalExcelData && window.originalExcelData.length > 0) {
+      window.originalExcelData.forEach(row => {
+        Object.keys(row).forEach(key => {
+          allKeys.add(key);
+        });
+      });
+    }
+    
+    // Then add all keys from the processed data (except for _originalData)
+    data.forEach(d => {
+      Object.keys(d).forEach(key => {
+        if (key !== '_originalData') {
+          allKeys.add(key);
+        }
+      });
+    });
+    
+    csvColumns = Array.from(allKeys);
+  }
+  
+  // Add calculated fields at the end if they don't already exist
+  calculatedFields.forEach(field => {
+    if (!csvColumns.includes(field)) {
+      csvColumns.push(field);
+    }
+  });
+  
+  console.log("CSV will include", csvColumns.length, "columns");
+  
+  // Create the CSV header
+  let csvStr = csvColumns.join(',') + '\n';
+  
+  // Group data by RID for calculating current change correctly
+  const ridGroups = {};
+  data.forEach(d => {
+    if (!ridGroups[d.rid]) {
+      ridGroups[d.rid] = [];
+    }
+    ridGroups[d.rid].push(d);
+  });
+  
+  // Process each data point
+  for (const d of data) {
+    // Create an export row object
+    const exportRow = {};
+    
+    // Process each column in order
+    csvColumns.forEach(col => {
+      // Check different places the data might be stored
+      if (d[col] !== undefined) {
+        // Direct match in the processed data
+        exportRow[col] = d[col];
+      } else if (d._originalData && d._originalData[col] !== undefined) {
+        // Check the original data backup
+        exportRow[col] = d._originalData[col];
+      } else {
+        // Check for camelCase variations
+        const camelCase = col.toLowerCase().replace(/(_)([a-z])/g, (m, p1, p2) => p2.toUpperCase());
+        if (d[camelCase] !== undefined) {
+          exportRow[col] = d[camelCase];
+        } else {
+          // Not found, use empty string
+          exportRow[col] = '';
+        }
+      }
+    });
+    
+    // Ensure our calculated fields are always included
+    exportRow['Station'] = d.station;
+    exportRow['Signal(mA)'] = d.signal;
+    exportRow['Current(dBmA)'] = d.current;
+    exportRow['GroupID'] = d.group;
+    exportRow['Removed'] = d.removed ? 'Yes' : 'No';
+    
+    // Calculate % Current Change/100ft within the same RID
+    if (d.group !== null) {
+      const ridData = ridGroups[d.rid] || [];
+      const groupPoints = ridData.filter(p => p.group === d.group);
+      
+      if (groupPoints.length >= 2) {
+        groupPoints.sort((a, b) => a.station - b.station);
+        const pointIndex = groupPoints.findIndex(p => p.station === d.station);
+        
+        if (pointIndex < groupPoints.length - 1) {
+          const nextPoint = groupPoints[pointIndex + 1];
+          const stationDiff = nextPoint.station - d.station;
+          const currentDiff = nextPoint.current - d.current;
+          const changePerFt = currentDiff / stationDiff;
+          const changePer100Ft = changePerFt * 100;
+          exportRow['% Current Change/100ft'] = changePer100Ft.toFixed(4);
+        } else {
+          exportRow['% Current Change/100ft'] = '';
+        }
+      } else {
+        exportRow['% Current Change/100ft'] = '';
+      }
+    } else {
+      exportRow['% Current Change/100ft'] = '';
+    }
+    
+    // Build the CSV row by joining values in the correct order
+    const row = csvColumns.map(key => {
+      const value = exportRow[key] !== undefined ? exportRow[key] : '';
+      
+      // Wrap strings with commas in quotes
+      if (typeof value === 'string' && value.includes(',')) {
+        return `"${value}"`;
+      }
+      
+      return value;
+    }).join(',');
+    
+    csvStr += row + '\n';
+  }
+
+  // Check if we have multiple RIDs for filename
+  const uniqueRIDs = [...new Set(data.map(d => d.rid))];
+  const fileName = uniqueRIDs.length > 1 ? 'PCM_Data_All_RIDs.csv' : `PCM_Data_RID_${uniqueRIDs[0]}.csv`;
+
+  const blob = new Blob([csvStr], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  console.log("CSV export completed");
+}
+
+function exportToJSON(data) {
+  if (data.length === 0) {
+    showMessage('No data to export.', 'warning');
+    return;
+  }
+  
+  console.log("Starting JSON export with", data.length, "data points");
+  
+  // Group data by RID for calculating current change correctly
+  const ridGroups = {};
+  data.forEach(d => {
+    if (!ridGroups[d.rid]) {
+      ridGroups[d.rid] = [];
+    }
+    ridGroups[d.rid].push(d);
+  });
+  
+  // Create an export that preserves original field order
+  const exportData = data.map(d => {
+    // Create an object to store in order: original fields followed by calculated fields
+    const exportObj = {};
+    
+    // First add all original fields in the original order
+    if (originalColumns && originalColumns.length > 0) {
+      originalColumns.forEach(col => {
+        // Check if this field exists directly in the data point
+        if (d[col] !== undefined) {
+          exportObj[col] = d[col];
+        } else if (d._originalData && d._originalData[col] !== undefined) {
+          // Check the original data backup
+          exportObj[col] = d._originalData[col];
+        } else {
+          // Field name might be camelCase in our data structure
+          const camelCase = col.toLowerCase().replace(/(_)([a-z])/g, (m, p1, p2) => p2.toUpperCase());
+          if (d[camelCase] !== undefined) {
+            exportObj[camelCase] = d[camelCase];
+          } else {
+            // If we don't have this field, add null for JSON
+            exportObj[col] = null;
+          }
+        }
+      });
+    } else {
+      // Start with original data if available
+      if (d._originalData) {
+        Object.keys(d._originalData).forEach(key => {
+          exportObj[key] = d._originalData[key];
+        });
+      }
+      
+      // Then add all other properties from the processed data
+      Object.keys(d).forEach(key => {
+        if (key !== '_originalData') {
+          exportObj[key] = d[key];
+        }
+      });
+    }
+    
+    // Add calculated fields
+    exportObj.formattedStation = formatStation(d.station);
+    exportObj.current_dBmA = d.current;
+    exportObj.groupID = d.group;
+    exportObj.removed = d.removed;
+    
+    // Calculate % Current Change/100ft if group is assigned - within the same RID
+    if (d.group !== null) {
+      const ridData = ridGroups[d.rid] || [];
+      const groupPoints = ridData.filter(p => p.group === d.group);
+      
+      if (groupPoints.length >= 2) {
+        // Sort by station to find adjacent points
+        groupPoints.sort((a, b) => a.station - b.station);
+        const pointIndex = groupPoints.findIndex(p => p.station === d.station);
+        
+        // If not the last point in group, calculate change to next point
+        if (pointIndex < groupPoints.length - 1) {
+          const nextPoint = groupPoints[pointIndex + 1];
+          const stationDiff = nextPoint.station - d.station;
+          const currentDiff = nextPoint.current - d.current;
+          const changePerFt = currentDiff / stationDiff;
+          const changePer100Ft = changePerFt * 100;
+          exportObj.currentChangePer100Ft = parseFloat(changePer100Ft.toFixed(4));
+        } else {
+          exportObj.currentChangePer100Ft = null;
+        }
+      } else {
+        exportObj.currentChangePer100Ft = null;
+      }
+    } else {
+      exportObj.currentChangePer100Ft = null;
+    }
+    
+    return exportObj;
+  });
+  
+  // Check if we have multiple RIDs
+  const uniqueRIDs = [...new Set(data.map(d => d.rid))];
+  const fileName = uniqueRIDs.length > 1 ? 'PCM_Data_All_RIDs.json' : `PCM_Data_RID_${uniqueRIDs[0]}.json`;
+  
+  // For JSON, we might also want to create a more structured output for multiple RIDs
+  let jsonOutput;
+  if (uniqueRIDs.length > 1) {
+    // Create a structured JSON with data grouped by RID
+    jsonOutput = {
+      summary: {
+        totalPoints: data.length,
+        rids: uniqueRIDs,
+        groups: [...new Set(data.filter(d => d.group !== null).map(d => d.group))]
+      },
+      // Group data by RID
+      ridData: Object.fromEntries(
+        Object.entries(ridGroups).map(([rid, points]) => [rid, points.map(p => {
+          const dataPoint = exportData.find(d => d.station === p.station && d.rid === p.rid);
+          return dataPoint || p;
+        })])
+      ),
+      // Also include the flat data array
+      allData: exportData
     };
+  } else {
+    // Single RID - just use the flat array
+    jsonOutput = exportData;
+  }
+  
+  // Debug output
+  console.log("JSON export structure created with", exportData.length, "data points");
+  if (exportData.length > 0) {
+    console.log("Field count in first exported item:", Object.keys(exportData[0]).length);
+  }
+  
+  const jsonStr = JSON.stringify(jsonOutput, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  console.log("JSON export completed");
+}
+
+/************************************************************
+ * Utility / Helper Functions
+ ************************************************************/
+function showMessage(message, type = 'info') {
+  // Create the message container
+  const messageArea = document.getElementById('message-area');
+  
+  // Create the message element
+  const messageElement = document.createElement('div');
+  messageElement.className = `message ${type}`;
+  
+  // Add appropriate icon based on message type
+  let icon = '';
+  switch (type) {
+    case 'success':
+      icon = '<i class="fa fa-check-circle"></i>';
+      break;
+    case 'error':
+      icon = '<i class="fa fa-times-circle"></i>';
+      break;
+    case 'warning':
+      icon = '<i class="fa fa-exclamation-triangle"></i>';
+      break;
+    default:
+      icon = '<i class="fa fa-info-circle"></i>';
+  }
+  
+  // Add content to message
+  messageElement.innerHTML = `
+    ${icon} 
+    <span>${message}</span>
+    <button class="close-message" onclick="this.parentElement.remove()">
+      <i class="fa fa-times"></i>
+    </button>
+  `;
+  
+  // Add to message area
+  messageArea.appendChild(messageElement);
+  
+  // Set auto-dismiss timer (except for errors)
+  if (type !== 'error') {
+    const dismissTime = type === 'warning' ? 6000 : 4000;
+    setTimeout(() => {
+      if (messageElement.parentElement) {
+        messageElement.classList.add('fade-out');
+        setTimeout(() => {
+          if (messageElement.parentElement) {
+            messageElement.remove();
+          }
+        }, 300);
+      }
+    }, dismissTime);
+  }
+}
+
+function openHelpModal() {
+  document.getElementById('help-modal').style.display = 'block';
+}
+
+function closeHelpModal() {
+  document.getElementById('help-modal').style.display = 'none';
+}
+
+function openAboutModal() {
+  document.getElementById('about-modal').style.display = 'block';
+}
+
+function closeAboutModal() {
+  document.getElementById('about-modal').style.display = 'none';
+}
+
+/************************************************************
+ * Utility Functions
+ ************************************************************/
+
+/**
+ * Formats a station number in the "00+00" format
+ * @param {number} station - The station value to format
+ * @returns {string} Formatted station string
+ */
+function formatStation(station) {
+  if (station == null || isNaN(station)) return '';
+  
+  // Split the station into whole and decimal parts
+  const wholePart = Math.floor(station / 100);
+  const decimalPart = Math.round(station % 100);
+  
+  // Format as 00+00
+  return `${wholePart}+${decimalPart.toString().padStart(2, '0')}`;
 }
 
 /**
- * Calculates percentage changes between adjacent groups and creates transition bars
- * @param {Array} datasets - The current chart datasets
- * @param {Array} ridGroups - The groups for the current RID
- * @returns {Array} - Updated datasets with transition bars between groups
+ * Calculates percentage change between consecutive points
+ * @param {Array} data - Array of data points
+ * @param {Object} group - Optional group object for group-specific calculations
+ * @returns {Array} Array of percentage change objects
  */
-function addGroupTransitionBars(datasets, ridGroups) {
-    // If we have fewer than 2 groups, there are no transitions to calculate
-    if (!ridGroups || ridGroups.length < 2) {
-        console.log('Not enough groups for transition bars:', ridGroups.length);
-        return datasets;
-    }
+function calculatePercentageChange(data, group = null) {
+  if (!data || data.length < 2) {
+    return []; // Return empty array if there's not enough data
+  }
+  
+  // Filter out any special points that might cause calculation issues
+  const validData = data.filter(point => !point.isSpecialPoint);
+  
+  if (validData.length < 2) {
+    return []; // Return empty array if there's not enough valid data after filtering
+  }
+  
+  // Sort data by station
+  const sortedData = [...validData].sort((a, b) => a.station - b.station);
+  
+  // Determine which parameter to use (prefer current if available)
+  const displayParameter = sortedData.some(point => point.current !== undefined) 
+      ? 'current' : 'signal';
+  
+  // Calculate changes between points
+  const percentageChanges = [];
+  
+  if (group) {
+    // For a group, calculate one value using first and last point
+    const firstPoint = sortedData[0];
+    const lastPoint = sortedData[sortedData.length - 1];
     
-    console.log('Creating transition bars between', ridGroups.length, 'groups');
-    
-    // Sort groups by their starting station (first point)
-    const sortedGroups = [...ridGroups].sort((a, b) => {
-        const aFirstStation = Math.min(...a.points.map(p => p.station));
-        const bFirstStation = Math.min(...b.points.map(p => p.station));
-        return aFirstStation - bFirstStation;
-    });
-    
-    console.log('Sorted groups:', sortedGroups.map(g => g.name));
-    
-    let transitionBarsCreated = 0;
-    
-    // For each adjacent pair of groups, calculate the transition
-    for (let i = 0; i < sortedGroups.length - 1; i++) {
-        const currentGroup = sortedGroups[i];
-        const nextGroup = sortedGroups[i + 1];
-        
-        // Skip if either group is not visible
-        if (!currentGroup.visible || !nextGroup.visible) {
-            console.log(`Skipping transition between ${currentGroup.name} and ${nextGroup.name} - visibility issue`);
-            continue;
-        }
-        
-        // Get the last point of the current group and first point of the next group
-        const currentGroupPoints = [...currentGroup.points].sort((a, b) => a.station - b.station);
-        const nextGroupPoints = [...nextGroup.points].sort((a, b) => a.station - b.station);
-        
-        if (currentGroupPoints.length === 0 || nextGroupPoints.length === 0) {
-            console.log(`Skipping transition - empty group points: ${currentGroup.name}=${currentGroupPoints.length}, ${nextGroup.name}=${nextGroupPoints.length}`);
-            continue;
-        }
-        
-        const lastPointOfCurrentGroup = currentGroupPoints[currentGroupPoints.length - 1];
-        const firstPointOfNextGroup = nextGroupPoints[0];
-        
-        // Skip if we don't have valid points
-        if (!lastPointOfCurrentGroup || !firstPointOfNextGroup) {
-            console.log(`Skipping transition between ${currentGroup.name} and ${nextGroup.name} - missing points`);
-            continue;
-        }
-        
-        console.log(`Creating transition between ${currentGroup.name} (station ${lastPointOfCurrentGroup.station}) and ${nextGroup.name} (station ${firstPointOfNextGroup.station})`);
-        
-        // Determine which parameter to use (prefer current if available)
-        const displayParameter = lastPointOfCurrentGroup.current !== undefined ? 'current' : activeParameter;
-        
-        // Calculate the percentage change between the last point of current group and first point of next group
-        const startValue = lastPointOfCurrentGroup[displayParameter];
-        const endValue = firstPointOfNextGroup[displayParameter];
-        const stationDistance = firstPointOfNextGroup.station - lastPointOfCurrentGroup.station;
-        
-        // Skip if distance is too small or values are invalid
-        if (stationDistance <= 0 || isNaN(startValue) || isNaN(endValue) || startValue === 0) {
-            console.log(`Skipping transition - invalid distance or values: distance=${stationDistance}, startValue=${startValue}, endValue=${endValue}`);
-            continue;
-        }
-        
-        // Calculate percentage change per 100 feet
-        const absoluteChange = endValue - startValue;
-        // Use Math.abs to ensure we always get a positive percentage change
-        const percentChange = (Math.abs(absoluteChange) / Math.abs(startValue)) * (100 / (stationDistance / 100));
-        
-        // Skip if percentage change is invalid or too extreme
-        if (isNaN(percentChange) || !isFinite(percentChange) || Math.abs(percentChange) > 1000) {
-            console.log(`Skipping transition - invalid percentage change: ${percentChange}%`);
-            continue;
-        }
-        
-        console.log(`Transition calculation: startValue=${startValue}, endValue=${endValue}, distance=${stationDistance}, absoluteChange=${Math.abs(absoluteChange)}, percentChange=${percentChange}%`);
-        
-        // Create a transition color that blends the two group colors
-        let transitionColor = 'rgba(128, 128, 128, 0.7)'; // Default gray
-        
-        // Try to blend the colors if they're in a format we can parse
+    // Skip if values are null or undefined
+    if (firstPoint && lastPoint && 
+        firstPoint[displayParameter] != null && lastPoint[displayParameter] != null) {
+      
+      const referenceValue = firstPoint[displayParameter]; // First point is reference
+      const currentValue = lastPoint[displayParameter];    // Last point is current
+      const distance = lastPoint.station - firstPoint.station;
+      
+      // Skip if distance is too small or reference value is near zero
+      if (distance >= 0.1 && Math.abs(referenceValue) >= 0.0001) {
         try {
-            if (currentGroup.color.startsWith('#') && nextGroup.color.startsWith('#')) {
-                // Convert hex to rgb
-                const currentRgb = {
-                    r: parseInt(currentGroup.color.slice(1, 3), 16),
-                    g: parseInt(currentGroup.color.slice(3, 5), 16),
-                    b: parseInt(currentGroup.color.slice(5, 7), 16)
-                };
-                
-                const nextRgb = {
-                    r: parseInt(nextGroup.color.slice(1, 3), 16),
-                    g: parseInt(nextGroup.color.slice(3, 5), 16),
-                    b: parseInt(nextGroup.color.slice(5, 7), 16)
-                };
-                
-                // Blend the colors (simple average)
-                const blendedRgb = {
-                    r: Math.floor((currentRgb.r + nextRgb.r) / 2),
-                    g: Math.floor((currentRgb.g + nextRgb.g) / 2),
-                    b: Math.floor((currentRgb.b + nextRgb.b) / 2)
-                };
-                
-                transitionColor = `rgba(${blendedRgb.r}, ${blendedRgb.g}, ${blendedRgb.b}, 0.7)`;
-            }
-        } catch (e) {
-            console.warn('Error blending colors for transition bar:', e);
+          // Calculate percentage change per 100 feet using the formula:
+          // 1. Calculate the percentage change: ((reference_value - current_value) / reference_value) * 100
+          // 2. Scale to per-100-feet basis: % Change * (100 / distance)
+          const percentChange = Math.abs((referenceValue - currentValue) / referenceValue) * 100 * (100 / distance);
+          
+          // Cap extreme values for display
+          const cappedPercentChange = percentChange > 10 ? 10 : percentChange;
+          
+          // Apply the same percentage change to all points in the group
+          for (let i = 1; i < sortedData.length; i++) {
+            const point = sortedData[i];
+            percentageChanges.push({
+              station: point.station,
+              percentChange: cappedPercentChange,
+              actualPercentChange: percentChange,
+              groupId: group.id,
+              groupName: group.name,
+              referenceStation: firstPoint.station,
+              distance: distance
+            });
+          }
+        } catch (error) {
+          console.warn("Error calculating percentage change for group:", error);
         }
-        
-        // Ensure the bar value is valid
-        const barValue = percentChange / 100; // Convert to decimal for consistency with other bars
-        
-        // Create a dataset for the transition bar
-        datasets.push({
-            label: `${currentGroup.name} → ${nextGroup.name} Transition`,
-            // Empty data array - we don't need actual points
-            data: [],
-            backgroundColor: transitionColor,
-            borderColor: transitionColor.replace('0.7', '1.0'),
-            borderWidth: 1,
-            borderDash: [5, 5], // Dashed border to distinguish from regular group bars
-            // Use special properties for continuous bar rendering
-            yAxisID: 'y1',
-            order: 0,
-            // Add custom properties for the continuous bar
-            continuousBar: true,
-            startX: lastPointOfCurrentGroup.station,
-            endX: firstPointOfNextGroup.station,
-            barValue: barValue,
-            isTransition: true // Mark as a transition bar
-        });
-        
-        transitionBarsCreated++;
+      }
     }
-    
-    console.log(`Created ${transitionBarsCreated} transition bars`);
-    
-    return datasets;
+  } else {
+    // If no group, calculate change between consecutive points
+    for (let i = 0; i < sortedData.length - 1; i++) {
+      const currentPoint = sortedData[i];
+      const nextPoint = sortedData[i+1];
+      
+      // Skip points with missing data
+      if (!currentPoint || !nextPoint) continue;
+      
+      // Get values
+      const referenceValue = currentPoint[displayParameter]; // This is the reference value (earlier point)
+      const currentValue = nextPoint[displayParameter];     // This is the current value (later point)
+      
+      // Skip if values are null or undefined
+      if (referenceValue == null || currentValue == null) continue;
+      
+      // Calculate distance between points
+      const distance = nextPoint.station - currentPoint.station;
+      
+      // Skip if distance is too small or current value is near zero
+      if (distance < 0.1 || Math.abs(referenceValue) < 0.0001) continue;
+      
+      try {
+        // Calculate percentage change per 100 feet using the formula:
+        // 1. Calculate the percentage change: ((reference_value - current_value) / reference_value) * 100
+        // 2. Scale to per-100-feet basis: % Change * (100 / distance)
+        const percentChange = Math.abs((referenceValue - currentValue) / referenceValue) * 100 * (100 / distance);
+        
+        // Cap extreme values for display
+        const cappedPercentChange = percentChange > 10 ? 10 : percentChange;
+        
+        // Store the result
+        percentageChanges.push({
+            station: nextPoint.station,
+            percentChange: cappedPercentChange,
+            actualPercentChange: percentChange,
+            groupId: null,
+            groupName: null,
+            referenceStation: currentPoint.station,
+            distance: distance
+        });
+      } catch (error) {
+        console.warn("Error calculating percentage change:", error);
+      }
+    }
+  }
+  
+  return percentageChanges;
 }
 
-/**
- * Calculates percentage changes between adjacent groups
- * Identifies the last point of each group and the first point of the next group
- * @returns {Object} Map of station values to between-group change data
- */
-function calculateBetweenGroupChanges() {
-    if (customGroups.length < 2) {
-        return {}; // No transitions if we have fewer than 2 groups
+// Add this new function after the handleDownloadData function
+function testExportData(data) {
+  console.log("=== TEST EXPORT DATA ===");
+  console.log("Total data points:", data.length);
+  
+  if (data.length === 0) {
+    console.log("No data to export");
+    return;
+  }
+  
+  // Check first data point details
+  const firstPoint = data[0];
+  console.log("First data point:", firstPoint);
+  
+  // Check if original data is preserved
+  if (firstPoint._originalData) {
+    console.log("Original data is preserved:", firstPoint._originalData);
+    console.log("Original field count:", Object.keys(firstPoint._originalData).length);
+  } else {
+    console.log("WARNING: No _originalData property found");
+  }
+  
+  // Compare original columns with what's in the data
+  if (originalColumns && originalColumns.length > 0) {
+    console.log("Original columns:", originalColumns);
+    
+    // Check which original columns exist in the data point
+    const missingColumns = originalColumns.filter(col => 
+      firstPoint[col] === undefined && 
+      (!firstPoint._originalData || firstPoint._originalData[col] === undefined)
+    );
+    
+    if (missingColumns.length > 0) {
+      console.log("WARNING: Missing original columns:", missingColumns);
+    } else {
+      console.log("All original columns are preserved");
     }
-    
-    const betweenGroupChanges = {};
-    
-    try {
-        // Sort all data points by station
-        const sortedData = [...parsedData].sort((a, b) => a.station - b.station);
-        
-        // Create a map of station to group
-        const stationToGroupMap = {};
-        customGroups.forEach(group => {
-            group.points.forEach(point => {
-                stationToGroupMap[point.station] = {
-                    groupId: group.id,
-                    groupName: group.name
-                };
-            });
-        });
-        
-        // Find group transitions in the sorted data
-        for (let i = 0; i < sortedData.length - 1; i++) {
-            const currentPoint = sortedData[i];
-            const nextPoint = sortedData[i + 1];
-            
-            const currentGroup = stationToGroupMap[currentPoint.station];
-            const nextGroup = stationToGroupMap[nextPoint.station];
-            
-            // Check if this is a transition between groups
-            if (currentGroup && nextGroup && currentGroup.groupId !== nextGroup.groupId) {
-                console.log(`Found group transition from "${currentGroup.groupName}" to "${nextGroup.groupName}" between stations ${currentPoint.station} and ${nextPoint.station}`);
-                
-                // Calculate distance between points
-                const distance = Math.abs(nextPoint.station - currentPoint.station);
-                
-                // Skip if distance is too small
-                if (distance < 0.1) continue;
-                
-                // Get current values for both points
-                const currentValue = currentPoint.current !== undefined ? 
-                    currentPoint.current : 
-                    currentPoint[activeParameter];
-                
-                const nextValue = nextPoint.current !== undefined ? 
-                    nextPoint.current : 
-                    nextPoint[activeParameter];
-                
-                // Skip if either value is too close to zero
-                if (Math.abs(currentValue) < 0.0001 || Math.abs(nextValue) < 0.0001) continue;
-                
-                // Calculate percentage change
-                const percentChange = Math.abs((currentValue - nextValue) / nextValue / distance * 100);
-                
-                // Cap extreme values for display purposes
-                const cappedPercentChange = percentChange > 100 ? 100 : percentChange;
-                
-                // Skip if the percentage change is invalid
-                if (!isNaN(percentChange) && isFinite(percentChange)) {
-                    // Store the transition data with the last point of the current group
-                    betweenGroupChanges[currentPoint.station] = {
-                        percentChange: cappedPercentChange,
-                        actualPercentChange: percentChange,
-                        nextGroupName: nextGroup.groupName,
-                        nextGroupId: nextGroup.groupId,
-                        distance: distance
-                    };
-                }
-            }
+  }
+  
+  // Test what would go into Excel export
+  const excelRow = {};
+  
+  // Add all original columns
+  if (originalColumns && originalColumns.length > 0) {
+    originalColumns.forEach(col => {
+      if (firstPoint[col] !== undefined) {
+        excelRow[col] = firstPoint[col];
+      } else if (firstPoint._originalData && firstPoint._originalData[col] !== undefined) {
+        excelRow[col] = firstPoint._originalData[col];
+      } else {
+        const camelCase = col.toLowerCase().replace(/(_)([a-z])/g, (m, p1, p2) => p2.toUpperCase());
+        if (firstPoint[camelCase] !== undefined) {
+          excelRow[col] = firstPoint[camelCase];
+        } else {
+          excelRow[col] = '';
         }
-    } catch (error) {
-        console.error('Error calculating between-group changes:', error);
+      }
+    });
+  }
+  
+  console.log("Test Excel row:", excelRow);
+  console.log("Excel row field count:", Object.keys(excelRow).length);
+  
+  if (originalColumns && originalColumns.length > 0) {
+    // Check if we're missing any original columns in the export
+    const missingInExport = originalColumns.filter(col => excelRow[col] === undefined);
+    if (missingInExport.length > 0) {
+      console.log("WARNING: Missing columns in export:", missingInExport);
+    } else {
+      console.log("All original columns included in export");
     }
-    
-    return betweenGroupChanges;
+  }
+  
+  console.log("=== END TEST EXPORT ===");
 }

@@ -1,310 +1,466 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PCM Data Grouping Tool</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.0.0"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.0"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-0.19.3/package/dist/xlsx.full.min.js"></script>
-    <script src="js/app.js" defer></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>PCM Data Grouping Tool</title>
+
+  <!-- Font Awesome (CDN) -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css?v=1"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
+
+  <!-- Leaflet CSS (CDN) -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css?v=1"
+    crossorigin=""
+  />
+
+  <!-- Main CSS -->
+  <link rel="stylesheet" href="css/style.css?v=1" />
+
+  <!-- Load essential libraries with proper error handling -->
+  <script>
+    // Keep track of loaded libraries
+    window.librariesLoaded = {
+      plotly: false,
+      xlsx: false,
+      leaflet: false
+    };
+
+    // Define a function to load a script with proper handling
+    function loadScript(src, id, fallbackSrc, callback) {
+      const script = document.createElement('script');
+      script.src = src;
+      script.id = id;
+      script.crossOrigin = "anonymous";
+      
+      script.onload = function() {
+        console.log(`Successfully loaded: ${id}`);
+        if (callback) callback(true);
+      };
+      
+      script.onerror = function() {
+        console.warn(`Failed to load: ${id} from ${src}`);
+        
+        // Try the fallback if available
+        if (fallbackSrc) {
+          console.log(`Attempting to load fallback: ${fallbackSrc}`);
+          const fallback = document.createElement('script');
+          fallback.src = fallbackSrc;
+          fallback.id = id + "-fallback";
+          
+          fallback.onload = function() {
+            console.log(`Successfully loaded fallback: ${id}`);
+            if (callback) callback(true);
+          };
+          
+          fallback.onerror = function() {
+            console.error(`Failed to load fallback: ${id}`);
+            if (callback) callback(false);
+          };
+          
+          document.head.appendChild(fallback);
+        } else {
+          if (callback) callback(false);
+        }
+      };
+      
+      document.head.appendChild(script);
+      return script;
+    }
+
+    // Load libraries in the correct order
+    loadScript(
+      "https://cdn.plot.ly/plotly-2.14.0.min.js?v=2", 
+      "plotly-js",
+      "js/vendor/plotly-2.14.0.min.js",
+      function(success) {
+        window.librariesLoaded.plotly = success;
+        
+        // After Plotly, load SheetJS
+        loadScript(
+          "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js?v=2", 
+          "xlsx-js",
+          "js/vendor/xlsx.full.min.js",
+          function(success) {
+            window.librariesLoaded.xlsx = success;
+            
+            // Finally load Leaflet
+            loadScript(
+              "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js?v=2", 
+              "leaflet-js",
+              "js/vendor/leaflet.js",
+              function(success) {
+                window.librariesLoaded.leaflet = success;
+                console.log("All libraries loaded:", window.librariesLoaded);
+              }
+            );
+          }
+        );
+      }
+    );
+  </script>
+
+  <!-- Main App JS - Load after libraries are attempted -->
+  <script src="js/app.js?v=2" defer></script>
 </head>
 <body>
-    <header>
-        <div class="header-content">
-            <h1>PCM Data Grouping Tool</h1>
-            <p class="subtitle">Pipeline Current Mapping Analysis & Visualization</p>
+  <!-- HEADER -->
+  <header class="app-header">
+    <img src="assets/LSC.png" alt="Logo" class="app-logo" />
+    <div class="title-group">
+      <h1>PCM Data Grouping Tool</h1>
+      <p class="subtitle">Analyze and visualize your PCM data with ease</p>
+    </div>
+  </header>
+
+  <!-- NAVIGATION BAR -->
+  <nav class="main-nav">
+    <a href="#data-input"><i class="fa fa-upload"></i> Data Input</a>
+    <a href="#visualization"><i class="fa fa-chart-line"></i> Visualization</a>
+    <a href="#grouping"><i class="fa fa-object-group"></i> Grouping</a>
+    <a href="#export"><i class="fa fa-download"></i> Export</a>
+    <a href="#map-section"><i class="fa fa-map"></i> Map</a>
+    <a href="#" id="help-btn" onclick="openHelpModal()"><i class="fa fa-question-circle"></i> Help</a>
+    <a href="#" id="about-btn" onclick="openAboutModal()"><i class="fa fa-info-circle"></i> About</a>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main>
+    <!-- DATA INPUT SECTION -->
+    <section id="data-input" class="section-card">
+      <h2><i class="fa fa-upload"></i> Data Input</h2>
+      <div class="file-format-info mb-2">
+        <div class="hint-text">
+          <i class="fa fa-info-circle"></i> 
+          <strong>Supported Format:</strong> Upload Excel (.xlsx) files with PCM data.
+          Files should include <strong>MEAS</strong> (station), <strong>SIGNAL</strong>, and <strong>POINTTYPE</strong> columns.
         </div>
-    </header>
-    
-    <nav class="main-nav">
-        <ul>
-            <li><a href="#data-input" class="active"><i class="fas fa-upload"></i> Data Input</a></li>
-            <li><a href="#visualization"><i class="fas fa-chart-line"></i> Visualization</a></li>
-            <li><a href="#grouping"><i class="fas fa-object-group"></i> Grouping</a></li>
-            <li><a href="#reports"><i class="fas fa-download"></i> Export</a></li>
-            <li><a href="#map"><i class="fas fa-map-marked-alt"></i> Map</a></li>
+      </div>
+      
+      <div class="upload-area" id="upload-area">
+        <div class="loading-indicator" id="upload-loading">
+          <i class="fa fa-spinner fa-spin"></i>
+          <span>Initializing file processing...</span>
+        </div>
+        <i class="fa fa-file-excel fa-3x mb-1" style="color: var(--accent-color);"></i>
+        <p>Drag and drop an Excel (.xlsx) file here, or click to select a file</p>
+        <input
+          type="file"
+          id="file-input"
+          accept=".xlsx"
+          onchange="handleFileSelection(this.files)"
+        />
+        <button type="button" class="upload-btn" id="trigger-upload-btn">
+          <i class="fa fa-folder-open"></i> Browse Files
+        </button>
+      </div>
+      
+      <div class="data-file-info mt-2" id="file-info" style="display: none;">
+        <h3><i class="fa fa-check-circle"></i> File Loaded Successfully</h3>
+        <p class="file-name" id="file-name"></p>
+        <div class="data-points-info" id="data-points-info"></div>
+      </div>
+      
+      <div class="rid-selector" id="rid-selector" style="display: none;">
+        <label for="rid-select">Select Route ID (RID):</label>
+        <select id="rid-select" onchange="handleRIDSelection(event)">
+          <!-- Dynamically populated -->
+        </select>
+      </div>
+    </section>
+
+    <!-- VISUALIZATION SECTION -->
+    <section id="visualization" class="section-card">
+      <h2><i class="fa fa-chart-line"></i> Visualization</h2>
+      
+      <div class="chart-instructions mb-1">
+        <p class="hint-text">
+          <i class="fa fa-mouse-pointer"></i> <strong>Point Selection:</strong> 
+          Use box or lasso selection tools in the toolbar to select data points.
+        </p>
+        <p class="hint-text">
+          <i class="fa fa-search-plus"></i> <strong>Zoom:</strong> 
+          Use mouse wheel or toolbar buttons to zoom. Double-click to reset zoom.
+        </p>
+      </div>
+      
+      <div id="plotly-chart"></div>
+      
+      <div class="chart-controls">
+        <button class="btn" onclick="toggleRemoveMode()" id="remove-points-btn">
+          <i class="fa fa-eraser"></i> Remove Points
+        </button>
+        <button class="btn" onclick="restoreRemovedPoints()" id="restore-points-btn">
+          <i class="fa fa-undo"></i> Restore Points
+        </button>
+        <button class="btn" onclick="resetPlotZoom()" id="fit-to-screen-btn">
+          <i class="fa fa-expand"></i> Fit to Screen
+        </button>
+      </div>
+      
+      <div id="selection-info" style="display: none;">
+        <div class="flex-row">
+          <i class="fa fa-info-circle mr-1"></i>
+          <strong>Selected Points:</strong> <span id="selection-count">0</span>
+        </div>
+        <div id="selection-stats" class="mt-1"></div>
+      </div>
+    </section>
+
+    <!-- GROUPING SECTION -->
+    <section id="grouping" class="section-card">
+      <h2><i class="fa fa-object-group"></i> Grouping</h2>
+      <div class="group-controls">
+        <div class="group-input-container">
+          <input type="text" id="group-name-input" placeholder="Enter group name for selected points..." />
+        </div>
+        <button class="btn" onclick="handleApplyCustomGroup()">
+          <i class="fa fa-plus"></i> Create Group from Selection
+        </button>
+      </div>
+      <div class="hint-text mt-1 mb-2">
+        <i class="fa fa-info-circle"></i> Select points on the chart, then create a custom group to classify them together.
+      </div>
+      <div id="group-list"></div>
+    </section>
+
+    <!-- EXPORT SECTION -->
+    <section id="export" class="section-card">
+      <h2><i class="fa fa-download"></i> Export</h2>
+      
+      <div class="export-description mb-2">
+        <p class="hint-text">
+          Export your data with custom groups and analysis results in your preferred format.
+          All exports include original data, calculated values, and grouping information.
+        </p>
+      </div>
+      
+      <div class="export-buttons">
+        <button class="btn" onclick="handleDownloadData('excel')">
+          <i class="fa fa-file-excel"></i> Excel Format
+        </button>
+        <button class="btn" onclick="handleDownloadData('csv')">
+          <i class="fa fa-file-csv"></i> CSV Format
+        </button>
+        <button class="btn" onclick="handleDownloadData('json')">
+          <i class="fa fa-code"></i> JSON Format
+        </button>
+      </div>
+      
+      <div class="export-features mt-2">
+        <h3 class="mb-1">Export Features</h3>
+        <div class="features-grid">
+          <div class="feature-item">
+            <i class="fa fa-table"></i>
+            <span>Complete data tables with all parameters</span>
+          </div>
+          <div class="feature-item">
+            <i class="fa fa-tags"></i>
+            <span>Custom groups with color coding</span>
+          </div>
+          <div class="feature-item">
+            <i class="fa fa-calculator"></i>
+            <span>Calculated statistics and changes</span>
+          </div>
+          <div class="feature-item">
+            <i class="fa fa-eye-slash"></i>
+            <span>Information about removed points</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAP SECTION -->
+    <section id="map-section" class="section-card">
+      <h2><i class="fa fa-map"></i> Geographic Map</h2>
+      <div id="map" class="map-container"></div>
+    </section>
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="app-footer">
+    <p>&copy; 2025 Lake Superior Consulting | <a href="#">Privacy Policy</a> | <a href="#">Contact</a></p>
+  </footer>
+
+  <!-- HELP MODAL -->
+  <div id="help-modal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeHelpModal()">&times;</span>
+      <h2>Help Guide</h2>
+      
+      <div class="help-intro">
+        <p>Welcome to the PCM Data Grouping Tool. This guide will help you understand how to use this application effectively.</p>
+      </div>
+      
+      <div class="help-section">
+        <h3><i class="fa fa-upload"></i> Data Upload</h3>
+        <div class="help-steps">
+          <div class="help-step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+              <h4>Upload Your Data</h4>
+              <p>Click or drag & drop your Excel (.xlsx) file in the upload area.</p>
+            </div>
+          </div>
+          <div class="help-step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+              <h4>Automatic Processing</h4>
+              <p>Your data will be automatically parsed and prepared for visualization.</p>
+            </div>
+          </div>
+          <div class="help-step">
+            <div class="step-number">3</div>
+            <div class="step-content">
+              <h4>Select Route ID</h4>
+              <p>If your data contains multiple Route IDs (RIDs), select one from the dropdown.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="help-section">
+        <h3><i class="fa fa-chart-line"></i> Chart Interaction</h3>
+        <ul class="help-list">
+          <li><strong>Zooming:</strong> Use the mouse wheel or zoom controls in the toolbar.</li>
+          <li><strong>Panning:</strong> Click and drag to move around the chart.</li>
+          <li><strong>Selection:</strong> Use box or lasso select tools from the toolbar to select points.</li>
+          <li><strong>Reset Zoom:</strong> Double-click the chart or use the "Fit to Screen" button.</li>
+          <li><strong>Point Removal:</strong> Use the "Remove Points" button, then click points to remove them.</li>
+          <li><strong>Restore Points:</strong> Click "Restore Points" to bring back all removed points.</li>
         </ul>
-    </nav>
-    
-    <main>
-        <section id="data-input" class="controls">
-            <div class="section-header">
-                <h2><i class="fas fa-upload"></i> Data Input</h2>
-            </div>
-            
-            <div class="control-panel">
-                <div class="file-input-container">
-                    <div class="drag-drop-area" id="drag-drop-area">
-                        <i class="fas fa-file-excel fa-3x"></i>
-                        <p>Drag & drop your Excel file here<br>or click to browse</p>
-                        <input type="file" id="file-input" accept=".xlsx" class="file-input">
-                    </div>
-                    <p class="file-status" id="file-status">No file selected</p>
-                </div>
-                
-                <div class="data-selection-container" id="data-selection-container" style="display: none; margin-top: 20px;">
-                    <div class="form-group">
-                        <label for="rid-select">Select Data Set (RID):</label>
-                        <select id="rid-select" class="form-control" disabled>
-                            <option value="">-- Select a data set --</option>
-                        </select>
-                    </div>
-                </div>
-            </div>
-        </section>
-        
-        <div id="message-area" role="status" aria-live="polite"></div>
-        
-        <section id="visualization" class="visualization-section">
-            <div class="section-header">
-                <h2><i class="fas fa-chart-line"></i> Data Visualization</h2>
-            </div>
-            
-            <div class="visualization-controls">
-                <button id="restore-points-btn" class="secondary-btn" disabled title="Restore all removed points">
-                    <i class="fas fa-undo"></i> Restore Removed Points
-                </button>
-                <button id="fit-screen-btn" class="secondary-btn" style="display: none;" disabled title="Fit chart to screen">
-                    <i class="fas fa-expand"></i> Fit to Screen
-                </button>
-                <p class="hint-text">Hold 'R' key and click on a point to remove it from the chart</p>
-                <p class="hint-text">Double-click anywhere on the chart to reset zoom</p>
-            </div>
-            
-            <div class="chart-container">
-                <canvas id="data-chart"></canvas>
-            </div>
-        </section>
-        
-        <section id="grouping" class="grouping-section">
-            <div class="section-header">
-                <h2><i class="fas fa-object-group"></i> Grouping & Labeling</h2>
-            </div>
-            
-            <div class="group-label-container">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="group-name">Group Name:</label>
-                        <input type="text" id="group-name" placeholder="Enter group name" disabled>
-                    </div>
-                </div>
-                
-                <button id="apply-group-btn" class="secondary-btn" disabled>
-                    <i class="fas fa-tag"></i> Apply to Selection
-                </button>
-                
-                <p class="hint-text">Click and drag on the chart to select points, then apply a group name.</p>
-            </div>
-            
-            <div class="group-visibility">
-                <h3>Manage Groups</h3>
-                <div id="group-toggles" class="toggle-container">
-                    <p class="hint-text">No groups defined yet</p>
-                </div>
-            </div>
-        </section>
-        
-        <section id="reports" class="reporting-section">
-            <div class="section-header">
-                <h2><i class="fas fa-download"></i> Export Data</h2>
-            </div>
-            
-            <div class="export-controls">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="export-format">Export Format:</label>
-                        <select id="export-format" disabled>
-                            <option value="excel">Excel</option>
-                            <option value="csv">CSV</option>
-                        </select>
-                    </div>
-                </div>
-                
-                <button id="download-btn" class="secondary-btn" disabled>
-                    <i class="fas fa-download"></i> Download Data
-                </button>
-            </div>
-            
-            <div id="output-data" class="results-container">
-                <div class="stats-summary">
-                    <h3>Data Summary</h3>
-                    <div class="stats-grid"></div>
-                </div>
-            </div>
-        </section>
-        
-        <section id="map" class="map-section">
-            <div class="section-header">
-                <h2><i class="fas fa-map-marked-alt"></i> Geographic Visualization</h2>
-            </div>
-            
-            <p class="map-instructions">View data points on the map (requires X and Y location data in Excel file)</p>
-            <div id="data-map"></div>
-        </section>
-    </main>
-    
-    <footer>
-        <div class="footer-content">
-            <p>Lake Superior Consulting &copy; 2025</p>
-            <div class="footer-links">
-                <a href="#" id="help-link" title="Help"><i class="fas fa-question-circle"></i></a>
-                <a href="#" id="info-link" title="About"><i class="fas fa-info-circle"></i></a>
-            </div>
+      </div>
+      
+      <div class="help-section">
+        <h3><i class="fa fa-object-group"></i> Grouping Data</h3>
+        <ol class="help-numbered-list">
+          <li>Select points on the chart using box or lasso selection</li>
+          <li>Enter a descriptive name in the group name field</li>
+          <li>Click "Create Group from Selection" to create the group</li>
+          <li>Manage your groups using the visibility and edit controls</li>
+        </ol>
+        <div class="help-tip">
+          <i class="fa fa-lightbulb"></i> 
+          <span>Groups are automatically color-coded and will persist when you export your data.</span>
         </div>
-    </footer>
-    
-    <!-- Help Modal -->
-    <div id="help-modal" class="modal-overlay" style="display: none;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3><i class="fas fa-question-circle"></i> Help Guide</h3>
-                <button class="modal-close-btn"><i class="fas fa-times"></i></button>
-            </div>
-            <div class="modal-body">
-                <div class="help-section-intro">
-                    <p>Welcome to the PCM Data Grouping Tool. This guide will help you understand how to use this powerful application effectively.</p>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-upload"></i> Data Upload</h4>
-                    <div class="help-grid">
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>1</span></div>
-                            <p>Click "Select File" or drag & drop your Excel (.xlsx), CSV, or TXT file</p>
-                        </div>
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>2</span></div>
-                            <p>The system will automatically parse and display your data</p>
-                        </div>
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>3</span></div>
-                            <p>Select a data set (RID) if multiple sets are available</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-chart-line"></i> Data Visualization</h4>
-                    <ul class="help-list">
-                        <li>Use the parameter dropdown to switch between different data views</li>
-                        <li>Data points are color-coded based on threshold and selection</li>
-                        <li>Hold the 'R' key and click on points to remove them from the chart</li>
-                        <li>Use the "Restore Removed Points" button to bring back any removed data</li>
-                    </ul>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-object-group"></i> Selecting & Grouping</h4>
-                    <div class="help-grid">
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>1</span></div>
-                            <p>Click and drag on the chart to select points</p>
-                        </div>
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>2</span></div>
-                            <p>Enter a group name in the field provided</p>
-                        </div>
-                        <div class="help-grid-item">
-                            <div class="help-step"><span>3</span></div>
-                            <p>Click "Apply to Selection" to create a custom group</p>
-                        </div>
-                    </div>
-                    <p class="help-tip"><i class="fas fa-lightbulb"></i> Tip: Use the checkboxes under "Manage Groups" to toggle group visibility</p>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-download"></i> Exporting Data</h4>
-                    <ul class="help-list">
-                        <li>Choose your preferred format (Excel, CSV) from the dropdown</li>
-                        <li>Click "Download Data" to export your data with all grouping information</li>
-                    </ul>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-map-marked-alt"></i> Geographic Map</h4>
-                    <ul class="help-list">
-                        <li>If your data includes X/Y coordinates, points will appear on the map</li>
-                        <li>Click markers to see detailed information</li>
-                        <li>Groups are color-coded consistently between chart and map</li>
-                    </ul>
-                </div>
-                
-                <div class="help-section">
-                    <h4><i class="fas fa-keyboard"></i> Keyboard Shortcuts</h4>
-                    <div class="shortcuts-grid">
-                        <div class="shortcut-item">
-                            <span class="key-combo">R + Click</span>
-                            <span class="key-desc">Remove a data point</span>
-                        </div>
-                        <div class="shortcut-item">
-                            <span class="key-combo">Shift + Drag</span>
-                            <span class="key-desc">Remove points from selection</span>
-                        </div>
-                        <div class="shortcut-item">
-                            <span class="key-combo">Esc</span>
-                            <span class="key-desc">Clear current selection</span>
-                        </div>
-                        <div class="shortcut-item">
-                            <span class="key-combo">Double-click</span>
-                            <span class="key-desc">Reset chart zoom</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
+      </div>
+      
+      <div class="help-section">
+        <h3><i class="fa fa-map"></i> Map Functionality</h3>
+        <p>If your data includes X and Y coordinates, the map will display your points geographically:</p>
+        <ul class="help-list">
+          <li>Points are displayed with the same colors as in the chart</li>
+          <li><strong>Point Types:</strong> Different point types are displayed with distinct markers:
+            <ul>
+              <li>Standard points: circular markers</li>
+              <li>Point Generic: square markers</li>
+              <li>Setup Location: triangle markers</li>
+            </ul>
+          </li>
+          <li>Click on map markers to see point details including Station, Signal, Current, and Point Type</li>
+          <li>Use map controls to zoom, pan, and change the base map style</li>
+          <li>Groups created in the chart are reflected with the same colors on the map</li>
+        </ul>
+      </div>
+      
+      <div class="help-section">
+        <h3><i class="fa fa-download"></i> Exporting Data</h3>
+        <p>Export your data with all custom groups and analysis in three formats:</p>
+        <ul class="help-list">
+          <li><strong>Excel:</strong> Complete workbook with data and analysis sheets</li>
+          <li><strong>CSV:</strong> Simple comma-separated values format for compatibility</li>
+          <li><strong>JSON:</strong> Structured data format for further processing</li>
+        </ul>
+      </div>
+      
+      <div class="help-shortcuts">
+        <h3><i class="fa fa-keyboard"></i> Keyboard Shortcuts</h3>
+        <div class="shortcut-grid">
+          <div class="shortcut-item">
+            <div class="key">Double-click</div>
+            <div class="action">Reset chart zoom</div>
+          </div>
+          <div class="shortcut-item">
+            <div class="key">Shift + Select</div>
+            <div class="action">Add to selection</div>
+          </div>
+          <div class="shortcut-item">
+            <div class="key">Alt + Select</div>
+            <div class="action">Subtract from selection</div>
+          </div>
+          <div class="shortcut-item">
+            <div class="key">Esc</div>
+            <div class="action">Cancel current mode</div>
+          </div>
         </div>
+      </div>
     </div>
-    
-    <!-- About/Info Modal -->
-    <div id="info-modal" class="modal-overlay" style="display: none;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3><i class="fas fa-info-circle"></i> About This Tool</h3>
-                <button class="modal-close-btn"><i class="fas fa-times"></i></button>
-            </div>
-            <div class="modal-body">
-                <div class="info-section info-header">
-                    <img src="LSC.png" alt="Lake Superior Consulting Logo" class="company-logo">
-                    <h4>PCM Data Grouping Tool</h4>
-                    <div class="version-badge">Version 2.1.0</div>
-                    <p>A web-based tool for analyzing and grouping Pipeline Current Mapping (PCM) data with visualization, custom grouping, and geographic mapping capabilities.</p>
-                </div>
-                
-                <div class="info-section">
-                    <h4><i class="fas fa-star"></i> Key Features</h4>
-                    <ul class="feature-list">
-                        <li><i class="fas fa-chart-line"></i> Interactive data visualization</li>
-                        <li><i class="fas fa-object-group"></i> Custom grouping of PCM data points</li>
-                        <li><i class="fas fa-map-marked-alt"></i> Geographic mapping of data</li>
-                        <li><i class="fas fa-download"></i> Multiple export formats</li>
-                        <li><i class="fas fa-chart-bar"></i> Support for various data parameters</li>
-                    </ul>
-                </div>
-                
-                <div class="info-section">
-                    <h4><i class="fas fa-file-excel"></i> File Format Support</h4>
-                    <p>This tool accepts Excel (.xlsx), CSV or TXT files with PCM data. Required columns include:</p>
-                    <ul class="data-format-list">
-                        <li><strong>MEAS:</strong> Station position (required)</li>
-                        <li><strong>POINTTYPE:</strong> The point type (required)</li>
-                        <li><strong>SIGNAL:</strong> The main value to analyze (required)</li>
-                        <li><strong>X/Y:</strong> Coordinates for mapping (optional)</li>
-                    </ul>
-                </div>
-                
-                <div class="info-section">
-                    <h4><i class="fas fa-code"></i> Development</h4>
-                    <p>Developed by Lake Superior Consulting's Engineering Software Solutions team</p>
-                    <p>&copy; 2025 Lake Superior Consulting. All Rights Reserved.</p>
-                    <p class="contact-info">For support, please contact <a href="mailto:support@lsconsulting.com">support@lsconsulting.com</a></p>
-                </div>
-            </div>
+  </div>
+
+  <!-- ABOUT MODAL -->
+  <div id="about-modal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeAboutModal()">&times;</span>
+      <h2>About PCM Data Grouping Tool</h2>
+      <div class="about-header">
+        <div class="app-info">
+          <div class="version-badge">Version 1.1.0</div>
+          <p>A web-based tool for analyzing, grouping, and visualizing Pipeline Current Mapping (PCM) data.</p>
         </div>
+      </div>
+      
+      <div class="about-section">
+        <h3><i class="fa fa-star"></i> Key Features</h3>
+        <ul class="feature-list">
+          <li><i class="fa fa-upload"></i> Excel file parsing with multi-dataset support</li>
+          <li><i class="fa fa-chart-line"></i> Interactive data visualization with Plotly.js</li>
+          <li><i class="fa fa-object-group"></i> Custom grouping of PCM data points</li>
+          <li><i class="fa fa-map"></i> Geographic mapping with proper point type display</li>
+          <li><i class="fa fa-calculator"></i> Automatic current calculation and percentage change analysis</li>
+          <li><i class="fa fa-download"></i> Export in multiple formats (Excel, CSV, JSON)</li>
+        </ul>
+      </div>
+      
+      <div class="about-section">
+        <h3><i class="fa fa-file-excel"></i> Supported Data Format</h3>
+        <p>This tool accepts Excel (.xlsx) files with PCM data. Required columns include:</p>
+        <ul class="format-list">
+          <li><strong>MEAS:</strong> Station position (required)</li>
+          <li><strong>SIGNAL:</strong> The signal value in mA (required)</li>
+          <li><strong>POINTTYPE:</strong> The data point type (required)</li>
+          <li><strong>X/Y:</strong> Coordinates for mapping (optional)</li>
+          <li><strong>RID:</strong> Route ID for multiple datasets (optional)</li>
+        </ul>
+      </div>
+      
+      <div class="about-section">
+        <h3><i class="fa fa-info-circle"></i> About PCM Data</h3>
+        <p>Pipeline Current Mapping (PCM) is a survey technique used to assess the condition of pipeline coatings and cathodic protection systems. This tool helps engineers and technicians analyze PCM data by:</p>
+        <ul>
+          <li>Converting signal values to current in dBmA</li>
+          <li>Calculating percentage changes between points</li>
+          <li>Identifying regions with similar characteristics</li>
+          <li>Visualizing data geographically when coordinates are available</li>
+        </ul>
+      </div>
+      
+      <div class="about-footer">
+        <p>&copy; 2025 Lake Superior Consulting | All Rights Reserved</p>
+        <p>For support, please contact <a href="mailto:customertools@lsconsulting.com">customertools@lsconsulting.com</a></p>
+      </div>
     </div>
+  </div>
+
+  <!-- MESSAGE SYSTEM -->
+  <div id="message-area" class="message-area"></div>
 </body>
-</html> 
+</html>
